@@ -23,8 +23,13 @@ const MONTHS = [
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+const quickTimes = ["09:00", "12:00", "15:00", "18:00", "20:00"];
+
 function toDateKey(date) {
-  return date.toISOString().split("T")[0];
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function prettyDate(date) {
@@ -70,6 +75,10 @@ function buildMonthGrid(year, month) {
   return cells;
 }
 
+function groupNameById(groups, groupId) {
+  return groups.find((group) => group.id === groupId)?.name || "your group";
+}
+
 export default function Planner() {
   const { user } = useAuth();
   const today = new Date();
@@ -81,6 +90,9 @@ export default function Planner() {
   const [groups, setGroups] = useState([]);
   const [events, setEvents] = useState([]);
   const [tasks, setTasks] = useState([]);
+
+  const [mode, setMode] = useState("event");
+  const [notice, setNotice] = useState("");
 
   const [eventTitle, setEventTitle] = useState("");
   const [eventGroupId, setEventGroupId] = useState("");
@@ -210,9 +222,42 @@ export default function Planner() {
   }
 
   function makeDateTime(date, time) {
-    const cleanDate = toDateKey(date);
-    if (!time) return new Date(`${cleanDate}T12:00:00`);
-    return new Date(`${cleanDate}T${time}:00`);
+    const [hourRaw, minuteRaw] = time ? time.split(":") : ["12", "00"];
+    const hour = Number(hourRaw || 12);
+    const minute = Number(minuteRaw || 0);
+
+    return new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+      hour,
+      minute,
+      0
+    );
+  }
+
+  async function notifyGroupMembers(groupId, title, body, link) {
+    if (!groupId) return;
+
+    const { data: members } = await supabase
+      .from("group_members")
+      .select("user_id")
+      .eq("group_id", groupId)
+      .eq("status", "accepted");
+
+    const rows =
+      members?.map((member) => ({
+        user_id: member.user_id,
+        type: "group_activity",
+        title,
+        body,
+        read: false,
+        link,
+      })) || [];
+
+    if (rows.length > 0) {
+      await supabase.from("notifications").insert(rows);
+    }
   }
 
   async function createEvent() {
@@ -227,7 +272,7 @@ export default function Planner() {
       ? makeDateTime(selectedDate, eventEndTime)
       : new Date(startsAt.getTime() + 60 * 60 * 1000);
 
-    const { error } = await supabase
+    const { data: createdEvent, error } = await supabase
       .from("planner_events")
       .insert({
         creator_id: user.id,
@@ -239,7 +284,9 @@ export default function Planner() {
         end_time: eventAllDay ? null : eventEndTime || null,
         is_all_day: eventAllDay,
         completed: false,
-      });
+      })
+      .select("*")
+      .single();
 
     if (error) {
       return Alert.alert("Could not create event", error.message);
@@ -254,13 +301,32 @@ export default function Planner() {
       link: "/planner",
     });
 
+    if (eventGroupId) {
+      const groupName = groupNameById(groups, eventGroupId);
+
+      await notifyGroupMembers(
+        eventGroupId,
+        "New group event",
+        `${title} was added to ${groupName}.`,
+        `/group/${eventGroupId}`
+      );
+
+      await supabase.from("messages").insert({
+        group_id: eventGroupId,
+        sender_id: user.id,
+        content: `📅 Event created: ${title} — ${prettyDate(selectedDate)}${
+          eventAllDay ? " all day" : eventStartTime ? ` at ${eventStartTime}` : ""
+        }`,
+      });
+    }
+
+    setNotice(`Event created: ${title}`);
     setEventTitle("");
     setEventGroupId("");
     setEventStartTime("");
     setEventEndTime("");
     setEventAllDay(false);
 
-    Alert.alert("Event created", `${title} was added.`);
     await loadPlanner();
   }
 
@@ -273,7 +339,7 @@ export default function Planner() {
 
     const dueAt = makeDateTime(selectedDate, taskDueTime);
 
-    const { error } = await supabase
+    const { data: createdTask, error } = await supabase
       .from("planner_tasks")
       .insert({
         creator_id: user.id,
@@ -282,7 +348,9 @@ export default function Planner() {
         due_at: dueAt.toISOString(),
         due_time: taskDueTime || null,
         completed: false,
-      });
+      })
+      .select("*")
+      .single();
 
     if (error) {
       return Alert.alert("Could not create task", error.message);
@@ -297,11 +365,30 @@ export default function Planner() {
       link: "/planner",
     });
 
+    if (taskGroupId) {
+      const groupName = groupNameById(groups, taskGroupId);
+
+      await notifyGroupMembers(
+        taskGroupId,
+        "New group task",
+        `${title} was added to ${groupName}.`,
+        `/group/${taskGroupId}`
+      );
+
+      await supabase.from("messages").insert({
+        group_id: taskGroupId,
+        sender_id: user.id,
+        content: `✅ Task created: ${title} — due ${prettyDate(selectedDate)}${
+          taskDueTime ? ` at ${taskDueTime}` : ""
+        }`,
+      });
+    }
+
+    setNotice(`Task created: ${title}`);
     setTaskTitle("");
     setTaskGroupId("");
     setTaskDueTime("");
 
-    Alert.alert("Task created", `${title} was added.`);
     await loadPlanner();
   }
 
@@ -360,14 +447,23 @@ export default function Planner() {
     );
   }
 
+  const completeTasks = tasksForSelectedDay.filter((task) => task.completed).length;
+  const selectedTotal = tasksForSelectedDay.length + eventsForSelectedDay.length;
+
   return (
     <ScrollView style={styles.page} contentContainerStyle={styles.content}>
       <View style={styles.hero}>
         <Text style={styles.title}>Planner</Text>
         <Text style={styles.subtitle}>
-          Personal plans, group events, and tasks in one place.
+          Pick a day, add an event or task, and optionally share it with a group.
         </Text>
       </View>
+
+      {!!notice && (
+        <View style={styles.notice}>
+          <Text style={styles.noticeText}>✅ {notice}</Text>
+        </View>
+      )}
 
       <View style={styles.calendarCard}>
         <View style={styles.calendarHeader}>
@@ -399,7 +495,7 @@ export default function Planner() {
           {calendarCells.map((cell, index) => {
             const key = toDateKey(cell.date);
             const selected = key === selectedKey;
-            const isToday = key === toDateKey(today);
+            const isToday = key === toDateKey(new Date());
             const dayEvents = eventsOnDate(cell.date);
             const dayTasks = tasksOnDate(cell.date);
 
@@ -446,211 +542,246 @@ export default function Planner() {
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Selected day</Text>
-        <Text style={styles.selectedDate}>{prettyDate(selectedDate)}</Text>
+        <View style={styles.sectionHeader}>
+          <View>
+            <Text style={styles.sectionTitle}>{prettyDate(selectedDate)}</Text>
+            <Text style={styles.muted}>
+              {selectedTotal === 0
+                ? "Nothing planned yet."
+                : `${eventsForSelectedDay.length} events • ${completeTasks}/${tasksForSelectedDay.length} tasks done`}
+            </Text>
+          </View>
+        </View>
 
-        {eventsForSelectedDay.length === 0 && tasksForSelectedDay.length === 0 ? (
-          <Text style={styles.muted}>Nothing here yet. This day is open.</Text>
+        {eventsForSelectedDay.map((event) => (
+          <View key={event.id} style={styles.item}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.itemTitle}>📅 {event.title}</Text>
+
+              <Text style={styles.itemSub}>
+                {event.is_all_day
+                  ? "All day"
+                  : `${event.start_time || "No time"}${
+                      event.end_time ? ` - ${event.end_time}` : ""
+                    }`}
+              </Text>
+
+              {event.groups && (
+                <View style={styles.groupTag}>
+                  <GroupAvatar
+                    name={event.groups.name}
+                    color={event.groups.avatar_color}
+                    emoji={event.groups.avatar_emoji}
+                    avatarUrl={event.groups.avatar_url}
+                    size={24}
+                  />
+                  <Text style={styles.groupTagText}>{event.groups.name}</Text>
+                </View>
+              )}
+            </View>
+
+            <Pressable onPress={() => deleteEvent(event)} style={styles.deleteButton}>
+              <Text style={styles.deleteText}>Delete</Text>
+            </Pressable>
+          </View>
+        ))}
+
+        {tasksForSelectedDay.map((task) => (
+          <Pressable key={task.id} onPress={() => toggleTask(task)} style={styles.item}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.itemTitle, task.completed && styles.completedText]}>
+                {task.completed ? "✓ " : "○ "}
+                {task.title}
+              </Text>
+
+              <Text style={styles.itemSub}>Due {task.due_time || "anytime"}</Text>
+
+              {task.groups && (
+                <View style={styles.groupTag}>
+                  <GroupAvatar
+                    name={task.groups.name}
+                    color={task.groups.avatar_color}
+                    emoji={task.groups.avatar_emoji}
+                    avatarUrl={task.groups.avatar_url}
+                    size={24}
+                  />
+                  <Text style={styles.groupTagText}>{task.groups.name}</Text>
+                </View>
+              )}
+            </View>
+
+            <Pressable onPress={() => deleteTask(task)} style={styles.deleteButton}>
+              <Text style={styles.deleteText}>Delete</Text>
+            </Pressable>
+          </Pressable>
+        ))}
+      </View>
+
+      <View style={styles.card}>
+        <View style={styles.modeSwitch}>
+          <Pressable
+            onPress={() => setMode("event")}
+            style={[styles.modeButton, mode === "event" && styles.modeButtonActive]}
+          >
+            <Text style={[styles.modeText, mode === "event" && styles.modeTextActive]}>
+              Event
+            </Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => setMode("task")}
+            style={[styles.modeButton, mode === "task" && styles.modeButtonActive]}
+          >
+            <Text style={[styles.modeText, mode === "task" && styles.modeTextActive]}>
+              Task
+            </Text>
+          </Pressable>
+        </View>
+
+        {mode === "event" ? (
+          <>
+            <Text style={styles.sectionTitle}>Create event</Text>
+
+            <AppInput
+              placeholder="Event title"
+              value={eventTitle}
+              onChangeText={setEventTitle}
+            />
+
+            <Pressable
+              onPress={() => setEventAllDay((value) => !value)}
+              style={[styles.toggle, eventAllDay && styles.toggleActive]}
+            >
+              <Text style={styles.toggleText}>
+                {eventAllDay ? "✓ All-day event" : "Timed event"}
+              </Text>
+            </Pressable>
+
+            {!eventAllDay && (
+              <>
+                <Text style={styles.label}>Start time</Text>
+
+                <View style={styles.quickTimeRow}>
+                  {quickTimes.map((time) => (
+                    <Pressable
+                      key={time}
+                      onPress={() => setEventStartTime(time)}
+                      style={[
+                        styles.timeChip,
+                        eventStartTime === time && styles.timeChipActive,
+                      ]}
+                    >
+                      <Text style={styles.timeChipText}>{time}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <AppInput
+                  placeholder="Custom start time, ex: 18:30"
+                  value={eventStartTime}
+                  onChangeText={setEventStartTime}
+                />
+
+                <AppInput
+                  placeholder="End time optional, ex: 20:00"
+                  value={eventEndTime}
+                  onChangeText={setEventEndTime}
+                />
+              </>
+            )}
+
+            <Text style={styles.label}>Share with group optional</Text>
+
+            <GroupPicker
+              groups={groups}
+              selectedGroupId={eventGroupId}
+              setSelectedGroupId={setEventGroupId}
+            />
+
+            <AppButton title="Create Event" onPress={createEvent} />
+          </>
         ) : (
           <>
-            {eventsForSelectedDay.map((event) => (
-              <View key={event.id} style={styles.item}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.itemTitle}>{event.title}</Text>
+            <Text style={styles.sectionTitle}>Add task</Text>
 
-                  <Text style={styles.itemSub}>
-                    {event.is_all_day
-                      ? "All day"
-                      : `${event.start_time || "No time"}${
-                          event.end_time ? ` - ${event.end_time}` : ""
-                        }`}
-                  </Text>
+            <AppInput
+              placeholder="Task title"
+              value={taskTitle}
+              onChangeText={setTaskTitle}
+            />
 
-                  {event.groups && (
-                    <View style={styles.groupTag}>
-                      <GroupAvatar
-                        name={event.groups.name}
-                        color={event.groups.avatar_color}
-                        emoji={event.groups.avatar_emoji}
-                        avatarUrl={event.groups.avatar_url}
-                        size={24}
-                      />
-                      <Text style={styles.groupTagText}>{event.groups.name}</Text>
-                    </View>
-                  )}
-                </View>
+            <Text style={styles.label}>Due time optional</Text>
 
-                <Pressable onPress={() => deleteEvent(event)} style={styles.deleteButton}>
-                  <Text style={styles.deleteText}>Delete</Text>
+            <View style={styles.quickTimeRow}>
+              {quickTimes.map((time) => (
+                <Pressable
+                  key={time}
+                  onPress={() => setTaskDueTime(time)}
+                  style={[
+                    styles.timeChip,
+                    taskDueTime === time && styles.timeChipActive,
+                  ]}
+                >
+                  <Text style={styles.timeChipText}>{time}</Text>
                 </Pressable>
-              </View>
-            ))}
+              ))}
+            </View>
 
-            {tasksForSelectedDay.map((task) => (
-              <Pressable
-                key={task.id}
-                onPress={() => toggleTask(task)}
-                style={styles.item}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text
-                    style={[
-                      styles.itemTitle,
-                      task.completed && styles.completedText,
-                    ]}
-                  >
-                    {task.completed ? "✓ " : ""}
-                    {task.title}
-                  </Text>
+            <AppInput
+              placeholder="Custom due time, ex: 16:00"
+              value={taskDueTime}
+              onChangeText={setTaskDueTime}
+            />
 
-                  <Text style={styles.itemSub}>
-                    Due {task.due_time || "anytime"}
-                  </Text>
+            <Text style={styles.label}>Share with group optional</Text>
 
-                  {task.groups && (
-                    <View style={styles.groupTag}>
-                      <GroupAvatar
-                        name={task.groups.name}
-                        color={task.groups.avatar_color}
-                        emoji={task.groups.avatar_emoji}
-                        avatarUrl={task.groups.avatar_url}
-                        size={24}
-                      />
-                      <Text style={styles.groupTagText}>{task.groups.name}</Text>
-                    </View>
-                  )}
-                </View>
+            <GroupPicker
+              groups={groups}
+              selectedGroupId={taskGroupId}
+              setSelectedGroupId={setTaskGroupId}
+            />
 
-                <Pressable onPress={() => deleteTask(task)} style={styles.deleteButton}>
-                  <Text style={styles.deleteText}>Delete</Text>
-                </Pressable>
-              </Pressable>
-            ))}
+            <AppButton title="Add Task" onPress={createTask} />
           </>
         )}
       </View>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Create event</Text>
-
-        <AppInput
-          placeholder="Event title"
-          value={eventTitle}
-          onChangeText={setEventTitle}
-        />
-
-        <View style={styles.timeRow}>
-          <AppInput
-            placeholder="Start time, ex: 18:30"
-            value={eventStartTime}
-            onChangeText={setEventStartTime}
-          />
-
-          <AppInput
-            placeholder="End time, ex: 20:00"
-            value={eventEndTime}
-            onChangeText={setEventEndTime}
-          />
-        </View>
-
-        <Pressable
-          onPress={() => setEventAllDay((value) => !value)}
-          style={[styles.toggle, eventAllDay && styles.toggleActive]}
-        >
-          <Text style={styles.toggleText}>
-            {eventAllDay ? "✓ All-day event" : "Make this an all-day event"}
-          </Text>
-        </Pressable>
-
-        <Text style={styles.label}>Assign to group optional</Text>
-
-        <View style={styles.groupPicker}>
-          <Pressable
-            onPress={() => setEventGroupId("")}
-            style={[
-              styles.groupChoice,
-              eventGroupId === "" && styles.groupChoiceActive,
-            ]}
-          >
-            <Text style={styles.groupChoiceText}>Personal</Text>
-          </Pressable>
-
-          {groups.map((group) => (
-            <Pressable
-              key={group.id}
-              onPress={() => setEventGroupId(group.id)}
-              style={[
-                styles.groupChoice,
-                eventGroupId === group.id && styles.groupChoiceActive,
-              ]}
-            >
-              <GroupAvatar
-                name={group.name}
-                color={group.avatar_color}
-                emoji={group.avatar_emoji}
-                avatarUrl={group.avatar_url}
-                size={26}
-              />
-              <Text style={styles.groupChoiceText}>{group.name}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <AppButton title="Create Event" onPress={createEvent} />
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Add task</Text>
-
-        <AppInput
-          placeholder="Task title"
-          value={taskTitle}
-          onChangeText={setTaskTitle}
-        />
-
-        <AppInput
-          placeholder="Due time optional, ex: 16:00"
-          value={taskDueTime}
-          onChangeText={setTaskDueTime}
-        />
-
-        <Text style={styles.label}>Assign to group optional</Text>
-
-        <View style={styles.groupPicker}>
-          <Pressable
-            onPress={() => setTaskGroupId("")}
-            style={[
-              styles.groupChoice,
-              taskGroupId === "" && styles.groupChoiceActive,
-            ]}
-          >
-            <Text style={styles.groupChoiceText}>Personal</Text>
-          </Pressable>
-
-          {groups.map((group) => (
-            <Pressable
-              key={group.id}
-              onPress={() => setTaskGroupId(group.id)}
-              style={[
-                styles.groupChoice,
-                taskGroupId === group.id && styles.groupChoiceActive,
-              ]}
-            >
-              <GroupAvatar
-                name={group.name}
-                color={group.avatar_color}
-                emoji={group.avatar_emoji}
-                avatarUrl={group.avatar_url}
-                size={26}
-              />
-              <Text style={styles.groupChoiceText}>{group.name}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <AppButton title="Add Task" onPress={createTask} />
-      </View>
     </ScrollView>
+  );
+}
+
+function GroupPicker({ groups, selectedGroupId, setSelectedGroupId }) {
+  return (
+    <View style={styles.groupPicker}>
+      <Pressable
+        onPress={() => setSelectedGroupId("")}
+        style={[
+          styles.groupChoice,
+          selectedGroupId === "" && styles.groupChoiceActive,
+        ]}
+      >
+        <Text style={styles.groupChoiceText}>Personal</Text>
+      </Pressable>
+
+      {groups.map((group) => (
+        <Pressable
+          key={group.id}
+          onPress={() => setSelectedGroupId(group.id)}
+          style={[
+            styles.groupChoice,
+            selectedGroupId === group.id && styles.groupChoiceActive,
+          ]}
+        >
+          <GroupAvatar
+            name={group.name}
+            color={group.avatar_color}
+            emoji={group.avatar_emoji}
+            avatarUrl={group.avatar_url}
+            size={26}
+          />
+          <Text style={styles.groupChoiceText}>{group.name}</Text>
+        </Pressable>
+      ))}
+    </View>
   );
 }
 
@@ -659,7 +790,15 @@ const styles = StyleSheet.create({
   content: { padding: 20, gap: 18, paddingBottom: 80 },
   hero: { paddingTop: 8 },
   title: { color: colors.text, fontSize: 38, fontWeight: "900" },
-  subtitle: { color: colors.muted, marginTop: 5 },
+  subtitle: { color: colors.muted, marginTop: 5, lineHeight: 20 },
+  notice: {
+    backgroundColor: "rgba(45,212,191,0.16)",
+    borderColor: colors.green,
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 14,
+  },
+  noticeText: { color: colors.text, fontWeight: "900" },
   calendarCard: {
     backgroundColor: colors.card,
     borderRadius: radii.xl,
@@ -754,8 +893,12 @@ const styles = StyleSheet.create({
     gap: 14,
     ...shadow,
   },
+  sectionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
   sectionTitle: { color: colors.text, fontSize: 24, fontWeight: "900" },
-  selectedDate: { color: colors.soft, fontWeight: "900", fontSize: 16 },
   muted: { color: colors.muted },
   item: {
     backgroundColor: colors.bg2,
@@ -782,7 +925,28 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   deleteText: { color: colors.text, fontWeight: "900", fontSize: 12 },
-  timeRow: { gap: 10 },
+  modeSwitch: {
+    flexDirection: "row",
+    backgroundColor: colors.bg2,
+    padding: 5,
+    borderRadius: 18,
+  },
+  modeButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 14,
+    alignItems: "center",
+  },
+  modeButtonActive: {
+    backgroundColor: colors.violet,
+  },
+  modeText: {
+    color: colors.muted,
+    fontWeight: "900",
+  },
+  modeTextActive: {
+    color: colors.text,
+  },
   toggle: {
     backgroundColor: colors.bg2,
     borderRadius: 16,
@@ -796,6 +960,28 @@ const styles = StyleSheet.create({
   },
   toggleText: { color: colors.text, fontWeight: "900" },
   label: { color: colors.soft, fontWeight: "900" },
+  quickTimeRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  timeChip: {
+    backgroundColor: colors.bg2,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  timeChipActive: {
+    backgroundColor: colors.violet,
+    borderColor: colors.violet,
+  },
+  timeChipText: {
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 12,
+  },
   groupPicker: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   groupChoice: {
     backgroundColor: colors.bg2,

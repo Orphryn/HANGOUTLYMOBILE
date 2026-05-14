@@ -19,14 +19,43 @@ import { colors, radii, shadow } from "../constants/theme";
 import { useAuth } from "../context/AuthContext";
 import { supabase } from "../lib/supabase";
 
-const avatarColors = ["#7C5CFF", "#FF7A90", "#FFB86B", "#2DD4BF", "#60A5FA", "#F472B6", "#FACC15"];
-const avatarEmojis = ["✨", "🔥", "🌙", "🎮", "🍿", "🏀", "🛡️", "💬"];
-const backgrounds = [
-  { id: "midnight", label: "Midnight" },
-  { id: "warm", label: "Warm Glow" },
-  { id: "ocean", label: "Ocean" },
-  { id: "forest", label: "Forest" },
+const avatarColors = [
+  "#7C5CFF",
+  "#FF7A90",
+  "#FFB86B",
+  "#2DD4BF",
+  "#60A5FA",
+  "#F472B6",
+  "#FACC15",
 ];
+
+const avatarEmojis = ["✨", "🔥", "🌙", "🎮", "🍿", "🏀", "🛡️", "💬"];
+
+const backgrounds = [
+  { id: "midnight", label: "Midnight", color: "#111827" },
+  { id: "warm", label: "Warm Glow", color: "#3a2630" },
+  { id: "ocean", label: "Ocean", color: "#123044" },
+  { id: "forest", label: "Forest", color: "#183528" },
+];
+
+function getExtension(asset, fileBody) {
+  const mime = asset?.mimeType || fileBody?.type || "";
+
+  if (mime.includes("gif")) return "gif";
+  if (mime.includes("png")) return "png";
+  if (mime.includes("webp")) return "webp";
+  if (mime.includes("jpeg")) return "jpg";
+  if (mime.includes("jpg")) return "jpg";
+
+  const uri = asset?.uri || "";
+  const fromUri = uri.split(".").pop()?.split("?")[0]?.toLowerCase();
+
+  if (["gif", "png", "webp", "jpg", "jpeg"].includes(fromUri)) {
+    return fromUri === "jpeg" ? "jpg" : fromUri;
+  }
+
+  return "jpg";
+}
 
 export default function GroupsPage() {
   const { user } = useAuth();
@@ -34,18 +63,19 @@ export default function GroupsPage() {
 
   const [groups, setGroups] = useState([]);
   const [notice, setNotice] = useState("");
+  const [creating, setCreating] = useState(false);
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [avatarColor, setAvatarColor] = useState("#7C5CFF");
   const [avatarEmoji, setAvatarEmoji] = useState("✨");
-  const [localAvatarUri, setLocalAvatarUri] = useState("");
+  const [avatarAsset, setAvatarAsset] = useState(null);
   const [chatBackground, setChatBackground] = useState("midnight");
 
   async function loadGroups() {
     if (!user?.id) return;
 
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("group_members")
       .select(`
         id,
@@ -63,6 +93,11 @@ export default function GroupsPage() {
       `)
       .eq("user_id", user.id)
       .eq("status", "accepted");
+
+    if (error) {
+      Alert.alert("Could not load groups", error.message);
+      return;
+    }
 
     setGroups(
       (data || [])
@@ -88,33 +123,72 @@ export default function GroupsPage() {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.All,
       quality: 0.9,
+      allowsEditing: false,
     });
 
-    if (!result.canceled) {
-      setLocalAvatarUri(result.assets[0].uri);
+    if (!result.canceled && result.assets?.[0]) {
+      setAvatarAsset(result.assets[0]);
     }
   }
 
   async function uploadAvatar(groupId) {
-    if (!localAvatarUri) return null;
+    if (!avatarAsset?.uri) return null;
 
-    const response = await fetch(localAvatarUri);
-    const blob = await response.blob();
+    const response = await fetch(avatarAsset.uri);
+    const fileBody = await response.blob();
 
-    const extension = localAvatarUri.split(".").pop()?.split("?")[0] || "jpg";
-    const path = `${groupId}/avatar-${Date.now()}.${extension}`;
+    const extension = getExtension(avatarAsset, fileBody);
+    const contentType =
+      avatarAsset.mimeType ||
+      fileBody.type ||
+      (extension === "gif" ? "image/gif" : "image/jpeg");
 
-    const { error } = await supabase.storage
+    const path = `${user.id}/${groupId}/avatar-${Date.now()}.${extension}`;
+
+    const { error: uploadError } = await supabase.storage
       .from("group-avatars")
-      .upload(path, blob, {
-        contentType: blob.type || "image/jpeg",
+      .upload(path, fileBody, {
+        contentType,
         upsert: true,
       });
 
-    if (error) throw error;
+    if (uploadError) {
+      throw uploadError;
+    }
 
     const { data } = supabase.storage.from("group-avatars").getPublicUrl(path);
+
+    if (!data?.publicUrl) {
+      throw new Error("Avatar uploaded, but Supabase did not return a public URL.");
+    }
+
     return data.publicUrl;
+  }
+
+  async function saveAvatarUrl(groupId, avatarUrl) {
+    const { data, error } = await supabase
+      .from("groups")
+      .update({ avatar_url: avatarUrl })
+      .eq("id", groupId)
+      .select(`
+        id,
+        name,
+        avatar_color,
+        avatar_emoji,
+        avatar_url,
+        chat_background
+      `)
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    if (!data?.avatar_url) {
+      throw new Error("Avatar URL did not save to the group row.");
+    }
+
+    return data;
   }
 
   async function createGroup() {
@@ -124,28 +198,29 @@ export default function GroupsPage() {
       return Alert.alert("Name required", "Give the group a name first.");
     }
 
-    const { data: group, error: groupError } = await supabase
-      .from("groups")
-      .insert({
-        name: cleanName,
-        description: description.trim() || null,
-        created_by: user.id,
-        avatar_color: avatarColor,
-        avatar_emoji: avatarEmoji,
-        chat_background: chatBackground,
-      })
-      .select("*")
-      .single();
-
-    if (groupError) {
-      return Alert.alert("Could not create group", groupError.message);
+    if (!user?.id) {
+      return Alert.alert("Not logged in", "Log in again first.");
     }
 
-    try {
-      const uploadedUrl = await uploadAvatar(group.id);
+    setCreating(true);
 
-      if (uploadedUrl) {
-        await supabase.from("groups").update({ avatar_url: uploadedUrl }).eq("id", group.id);
+    try {
+      const { data: group, error: groupError } = await supabase
+        .from("groups")
+        .insert({
+          name: cleanName,
+          description: description.trim() || null,
+          created_by: user.id,
+          avatar_color: avatarColor,
+          avatar_emoji: avatarEmoji,
+          avatar_url: null,
+          chat_background: chatBackground,
+        })
+        .select("*")
+        .single();
+
+      if (groupError) {
+        throw groupError;
       }
 
       const { error: memberError } = await supabase.from("group_members").insert({
@@ -157,7 +232,14 @@ export default function GroupsPage() {
       });
 
       if (memberError) {
-        return Alert.alert("Group created, but membership failed", memberError.message);
+        throw memberError;
+      }
+
+      let finalAvatarUrl = null;
+
+      if (avatarAsset?.uri) {
+        finalAvatarUrl = await uploadAvatar(group.id);
+        await saveAvatarUrl(group.id, finalAvatarUrl);
       }
 
       await supabase.from("notifications").insert({
@@ -169,6 +251,12 @@ export default function GroupsPage() {
         link: `/group/${group.id}`,
       });
 
+      await supabase.from("messages").insert({
+        group_id: group.id,
+        sender_id: user.id,
+        content: `✨ ${cleanName} was created.`,
+      });
+
       setNotice(`Created ${cleanName}.`);
       animateCreated();
 
@@ -176,12 +264,21 @@ export default function GroupsPage() {
       setDescription("");
       setAvatarColor("#7C5CFF");
       setAvatarEmoji("✨");
-      setLocalAvatarUri("");
+      setAvatarAsset(null);
       setChatBackground("midnight");
 
       await loadGroups();
+
+      Alert.alert(
+        "Group created",
+        finalAvatarUrl
+          ? "Your group was created and the avatar was saved."
+          : "Your group was created."
+      );
     } catch (err) {
-      Alert.alert("Avatar upload failed", err.message);
+      Alert.alert("Group creation failed", err.message);
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -202,48 +299,77 @@ export default function GroupsPage() {
             name={name || "Group"}
             color={avatarColor}
             emoji={avatarEmoji}
-            avatarUrl={localAvatarUri}
+            avatarUrl={avatarAsset?.uri}
             size={76}
           />
 
           <View style={{ flex: 1 }}>
             <Text style={styles.previewTitle}>{name || "Your group"}</Text>
-            <Text style={styles.muted}>{description || "Pick an avatar and background."}</Text>
+            <Text style={styles.muted}>
+              {avatarAsset
+                ? "Picture selected. Color and emoji stay saved as fallback."
+                : "Pick a color, emoji, picture, and background."}
+            </Text>
           </View>
         </View>
 
         <AppInput placeholder="Group name" value={name} onChangeText={setName} />
-        <AppInput placeholder="Description optional" value={description} onChangeText={setDescription} />
+
+        <AppInput
+          placeholder="Description optional"
+          value={description}
+          onChangeText={setDescription}
+        />
 
         <Text style={styles.label}>Avatar color</Text>
+
         <View style={styles.colorRow}>
-          {avatarColors.map((c) => (
+          {avatarColors.map((color) => (
             <Pressable
-              key={c}
-              onPress={() => setAvatarColor(c)}
-              style={[styles.colorDot, { backgroundColor: c }, avatarColor === c && styles.selectedDot]}
+              key={color}
+              onPress={() => setAvatarColor(color)}
+              style={[
+                styles.colorDot,
+                { backgroundColor: color },
+                avatarColor === color && styles.selectedDot,
+              ]}
             />
           ))}
         </View>
 
         <Text style={styles.label}>Avatar emoji</Text>
+
         <View style={styles.emojiRow}>
-          {avatarEmojis.map((e) => (
+          {avatarEmojis.map((emoji) => (
             <Pressable
-              key={e}
-              onPress={() => setAvatarEmoji(e)}
-              style={[styles.emojiButton, avatarEmoji === e && styles.selectedEmoji]}
+              key={emoji}
+              onPress={() => setAvatarEmoji(emoji)}
+              style={[
+                styles.emojiButton,
+                avatarEmoji === emoji && styles.selectedEmoji,
+              ]}
             >
-              <Text style={styles.emojiText}>{e}</Text>
+              <Text style={styles.emojiText}>{emoji}</Text>
             </Pressable>
           ))}
         </View>
 
         <AppButton title="Upload picture or GIF" variant="secondary" onPress={pickAvatar} />
 
-        {localAvatarUri ? <Image source={{ uri: localAvatarUri }} style={styles.uploadPreview} /> : null}
+        {avatarAsset?.uri ? (
+          <View style={styles.uploadBox}>
+            <Image source={{ uri: avatarAsset.uri }} style={styles.uploadPreview} />
+
+            <Pressable onPress={() => setAvatarAsset(null)} style={styles.removeImageButton}>
+              <Text style={styles.removeImageText}>
+                Remove picture and use emoji bubble
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
 
         <Text style={styles.label}>Chat background</Text>
+
         <View style={styles.backgroundGrid}>
           {backgrounds.map((bg) => (
             <Pressable
@@ -251,7 +377,7 @@ export default function GroupsPage() {
               onPress={() => setChatBackground(bg.id)}
               style={[
                 styles.backgroundChoice,
-                styles[`bg_${bg.id}`],
+                { backgroundColor: bg.color },
                 chatBackground === bg.id && styles.selectedBackground,
               ]}
             >
@@ -260,33 +386,43 @@ export default function GroupsPage() {
           ))}
         </View>
 
-        <AppButton title="Create Group" onPress={createGroup} />
+        <AppButton
+          title={creating ? "Creating..." : "Create Group"}
+          onPress={createGroup}
+          disabled={creating}
+        />
       </Animated.View>
 
       <View style={styles.card}>
         <Text style={styles.title}>Your groups</Text>
 
-        {groups.map((group) => (
-          <Pressable
-            key={group.id}
-            onPress={() => router.push(`/group/${group.id}`)}
-            style={styles.groupRow}
-          >
-            <GroupAvatar
-              name={group.name}
-              color={group.avatar_color}
-              emoji={group.avatar_emoji}
-              avatarUrl={group.avatar_url}
-            />
+        {groups.length === 0 ? (
+          <Text style={styles.muted}>No groups yet. Create one above.</Text>
+        ) : (
+          groups.map((group) => (
+            <Pressable
+              key={group.id}
+              onPress={() => router.push(`/group/${group.id}`)}
+              style={styles.groupRow}
+            >
+              <GroupAvatar
+                name={group.name}
+                color={group.avatar_color}
+                emoji={group.avatar_emoji}
+                avatarUrl={group.avatar_url}
+              />
 
-            <View style={{ flex: 1 }}>
-              <Text style={styles.groupName}>{group.name}</Text>
-              <Text style={styles.muted}>{group.description || "No description yet."}</Text>
-            </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.groupName}>{group.name}</Text>
+                <Text style={styles.muted}>
+                  {group.description || "No description yet."}
+                </Text>
+              </View>
 
-            <Text style={styles.role}>{group.role}</Text>
-          </Pressable>
-        ))}
+              <Text style={styles.role}>{group.role}</Text>
+            </Pressable>
+          ))
+        )}
       </View>
     </ScrollView>
   );
@@ -325,8 +461,17 @@ const styles = StyleSheet.create({
   },
   previewTitle: { color: colors.text, fontSize: 19, fontWeight: "900" },
   colorRow: { flexDirection: "row", gap: 10, flexWrap: "wrap" },
-  colorDot: { width: 34, height: 34, borderRadius: 999, borderWidth: 2, borderColor: "transparent" },
-  selectedDot: { borderColor: colors.text, transform: [{ scale: 1.08 }] },
+  colorDot: {
+    width: 34,
+    height: 34,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: "transparent",
+  },
+  selectedDot: {
+    borderColor: colors.text,
+    transform: [{ scale: 1.08 }],
+  },
   emojiRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   emojiButton: {
     width: 42,
@@ -338,10 +483,39 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
-  selectedEmoji: { backgroundColor: colors.violet },
+  selectedEmoji: {
+    backgroundColor: colors.violet,
+    borderColor: colors.text,
+  },
   emojiText: { fontSize: 20 },
-  uploadPreview: { width: 90, height: 90, borderRadius: 22, alignSelf: "center" },
-  backgroundGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  uploadBox: {
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: colors.bg2,
+    borderRadius: 20,
+    padding: 14,
+  },
+  uploadPreview: {
+    width: 110,
+    height: 110,
+    borderRadius: 24,
+  },
+  removeImageButton: {
+    backgroundColor: "rgba(251,113,133,0.18)",
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  removeImageText: {
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 12,
+  },
+  backgroundGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
   backgroundChoice: {
     width: "48%",
     minHeight: 74,
@@ -351,12 +525,13 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: "transparent",
   },
-  selectedBackground: { borderColor: colors.soft },
-  backgroundText: { color: colors.text, fontWeight: "900" },
-  bg_midnight: { backgroundColor: "#111827" },
-  bg_warm: { backgroundColor: "#3a2630" },
-  bg_ocean: { backgroundColor: "#123044" },
-  bg_forest: { backgroundColor: "#183528" },
+  selectedBackground: {
+    borderColor: colors.soft,
+  },
+  backgroundText: {
+    color: colors.text,
+    fontWeight: "900",
+  },
   groupRow: {
     backgroundColor: colors.bg2,
     borderRadius: 22,
@@ -365,6 +540,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 12,
   },
-  groupName: { color: colors.text, fontWeight: "900", fontSize: 17 },
-  role: { color: colors.soft, fontWeight: "900", fontSize: 12 },
+  groupName: {
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 17,
+  },
+  role: {
+    color: colors.soft,
+    fontWeight: "900",
+    fontSize: 12,
+  },
 });

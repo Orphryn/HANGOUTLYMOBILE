@@ -25,10 +25,13 @@ function formatTime(value) {
   if (!value) return "";
   const date = new Date(value);
   const diffMin = Math.floor((new Date() - date) / 60000);
+
   if (diffMin < 1) return "now";
   if (diffMin < 60) return `${diffMin}m`;
+
   const diffHours = Math.floor(diffMin / 60);
   if (diffHours < 24) return `${diffHours}h`;
+
   return `${Math.floor(diffHours / 24)}d`;
 }
 
@@ -40,6 +43,7 @@ export default function Dashboard() {
   const [invites, setInvites] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [showAllChats, setShowAllChats] = useState(false);
 
   async function loadDashboard() {
     if (!user?.id) return;
@@ -105,7 +109,7 @@ export default function Dashboard() {
         `)
         .in("group_id", groupIds)
         .order("created_at", { ascending: false })
-        .limit(100);
+        .limit(150);
 
       const seen = new Set();
       const chats = [];
@@ -177,7 +181,7 @@ export default function Dashboard() {
       .select("*")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
-      .limit(8);
+      .limit(6);
 
     setNotifications(notificationRows || []);
   }
@@ -218,6 +222,7 @@ export default function Dashboard() {
   }
 
   const unreadCount = notifications.filter((item) => !item.read).length;
+  const visibleChats = showAllChats ? recentChats : recentChats.slice(0, 3);
 
   return (
     <ScrollView
@@ -256,7 +261,7 @@ export default function Dashboard() {
         <AliveCard style={styles.quickCard} onPress={() => router.push("/planner")}>
           <Text style={styles.quickIcon}>📅</Text>
           <Text style={styles.quickTitle}>Planner</Text>
-          <Text style={styles.quickText}>Tasks and plans</Text>
+          <Text style={styles.quickText}>Events and tasks</Text>
         </AliveCard>
 
         <AliveCard style={styles.quickCard} onPress={() => router.push("/safety")}>
@@ -313,7 +318,7 @@ export default function Dashboard() {
         <View style={styles.sectionHeader}>
           <View>
             <Text style={styles.sectionTitle}>Recent chats</Text>
-            <Text style={styles.muted}>Where your groups left off.</Text>
+            <Text style={styles.muted}>The last rooms people touched.</Text>
           </View>
 
           <Pressable onPress={() => router.push("/groups")}>
@@ -321,7 +326,7 @@ export default function Dashboard() {
           </Pressable>
         </View>
 
-        {recentChats.length === 0 ? (
+        {visibleChats.length === 0 ? (
           <View style={styles.emptyState}>
             <Text style={styles.emptyTitle}>No groups yet.</Text>
             <Text style={styles.emptyText}>
@@ -336,7 +341,7 @@ export default function Dashboard() {
             </View>
           </View>
         ) : (
-          recentChats.map((chat) => (
+          visibleChats.map((chat) => (
             <AliveCard
               key={chat.group_id}
               style={styles.chatCard}
@@ -370,15 +375,35 @@ export default function Dashboard() {
             </AliveCard>
           ))
         )}
+
+        {recentChats.length > 3 && (
+          <Pressable
+            onPress={() => setShowAllChats((value) => !value)}
+            style={styles.showMoreButton}
+          >
+            <Text style={styles.showMoreText}>
+              {showAllChats ? "Show less" : `Show ${recentChats.length - 3} more`}
+            </Text>
+          </Pressable>
+        )}
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Little signals</Text>
+        <View style={styles.sectionHeader}>
+          <View>
+            <Text style={styles.sectionTitle}>Activity</Text>
+            <Text style={styles.muted}>Recent alerts, invites, tasks, and events.</Text>
+          </View>
+
+          <Pressable onPress={() => router.push("/notifications")}>
+            <Text style={styles.viewAll}>Open</Text>
+          </Pressable>
+        </View>
 
         {notifications.length === 0 ? (
           <Text style={styles.emptyText}>Nothing new yet.</Text>
         ) : (
-          notifications.map((item) => (
+          notifications.slice(0, 3).map((item) => (
             <Pressable
               key={item.id}
               onPress={() => item.link && router.push(item.link)}
@@ -496,6 +521,18 @@ const styles = StyleSheet.create({
   timeText: { color: colors.muted, fontSize: 12 },
   chatSnippet: { color: colors.muted, marginTop: 3 },
   activeDot: { height: 9, width: 9, borderRadius: 999, backgroundColor: colors.green },
+  showMoreButton: {
+    backgroundColor: colors.bg2,
+    borderRadius: 16,
+    padding: 13,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  showMoreText: {
+    color: colors.soft,
+    fontWeight: "900",
+  },
   notification: {
     backgroundColor: colors.bg2,
     borderRadius: 18,

@@ -10,10 +10,13 @@ function formatTime(value) {
   if (!value) return "";
   const date = new Date(value);
   const diffMin = Math.floor((new Date() - date) / 60000);
+
   if (diffMin < 1) return "now";
   if (diffMin < 60) return `${diffMin}m ago`;
+
   const diffHours = Math.floor(diffMin / 60);
   if (diffHours < 24) return `${diffHours}h ago`;
+
   return `${Math.floor(diffHours / 24)}d ago`;
 }
 
@@ -65,7 +68,7 @@ export default function Notifications() {
       <View style={styles.header}>
         <View>
           <Text style={styles.title}>Notifications</Text>
-          <Text style={styles.muted}>Everything your groups are doing.</Text>
+          <Text style={styles.muted}>Messages, invites, events, and tasks.</Text>
         </View>
 
         <Pressable onPress={markAllRead} style={styles.readButton}>
