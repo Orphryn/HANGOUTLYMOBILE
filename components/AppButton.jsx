@@ -1,15 +1,27 @@
 import { Pressable, StyleSheet, Text } from "react-native";
 import { colors, radii } from "../constants/theme";
 
-export default function AppButton({ title, onPress, variant = "primary" }) {
+export default function AppButton({
+  title,
+  onPress,
+  variant = "primary",
+  disabled = false,
+}) {
+  const bg =
+    variant === "danger"
+      ? colors.red
+      : variant === "secondary"
+      ? colors.bg2
+      : colors.violet;
+
   return (
     <Pressable
-      onPress={onPress}
+      onPress={disabled ? undefined : onPress}
       style={({ pressed }) => [
         styles.button,
-        variant === "secondary" && styles.secondary,
-        variant === "danger" && styles.danger,
-        pressed && styles.pressed,
+        { backgroundColor: bg },
+        pressed && !disabled && styles.pressed,
+        disabled && styles.disabled,
       ]}
     >
       <Text style={styles.text}>{title}</Text>
@@ -19,23 +31,19 @@ export default function AppButton({ title, onPress, variant = "primary" }) {
 
 const styles = StyleSheet.create({
   button: {
-    backgroundColor: colors.violet,
+    minHeight: 52,
     borderRadius: radii.md,
-    paddingVertical: 15,
-    paddingHorizontal: 18,
     alignItems: "center",
-  },
-  secondary: {
-    backgroundColor: colors.card2,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  danger: {
-    backgroundColor: colors.red,
+    justifyContent: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 14,
   },
   pressed: {
-    transform: [{ scale: 0.97 }],
-    opacity: 0.85,
+    opacity: 0.82,
+    transform: [{ scale: 0.98 }],
+  },
+  disabled: {
+    opacity: 0.55,
   },
   text: {
     color: colors.text,

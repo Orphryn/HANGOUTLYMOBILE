@@ -1,13 +1,35 @@
 import { router, useFocusEffect } from "expo-router";
 import { useCallback, useState } from "react";
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
+
+import AliveCard from "../components/AliveCard";
 import AppButton from "../components/AppButton";
+import GroupAvatar from "../components/GroupAvatar";
 import { colors, radii, shadow } from "../constants/theme";
 import { useAuth } from "../context/AuthContext";
 import { supabase } from "../lib/supabase";
 
-function name(profile) {
-  return profile?.username || profile?.display_name || profile?.email || "Someone";
+function displayName(profile) {
+  if (!profile) return "Someone";
+  return profile.username || profile.display_name || profile.email || "Someone";
+}
+
+function formatTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  const diffMin = Math.floor((new Date() - date) / 60000);
+  if (diffMin < 1) return "now";
+  if (diffMin < 60) return `${diffMin}m`;
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return `${diffHours}h`;
+  return `${Math.floor(diffHours / 24)}d`;
 }
 
 export default function Dashboard() {
@@ -20,74 +42,142 @@ export default function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
 
   async function loadDashboard() {
-    if (!user) return;
+    if (!user?.id) return;
 
     const { data: profileData } = await supabase
       .from("profiles")
-      .select("*")
+      .select("id, username, display_name, email")
       .eq("id", user.id)
-      .single();
+      .maybeSingle();
 
     setProfile(profileData);
 
     const { data: memberships } = await supabase
       .from("group_members")
-      .select("group_id, role, groups(id, name, description)")
+      .select(`
+        id,
+        role,
+        groups (
+          id,
+          name,
+          description,
+          avatar_color,
+          avatar_emoji,
+          avatar_url,
+          chat_background,
+          created_at
+        )
+      `)
       .eq("user_id", user.id)
       .eq("status", "accepted");
 
-    const groups = memberships?.map((row) => row.groups).filter(Boolean) || [];
-    const groupIds = groups.map((g) => g.id);
+    const groups =
+      memberships
+        ?.map((row) => ({ ...row.groups, role: row.role }))
+        .filter((group) => group?.id) || [];
+
+    const groupIds = groups.map((group) => group.id);
 
     if (groupIds.length > 0) {
       const { data: latestMessages } = await supabase
         .from("messages")
-        .select("id, group_id, content, created_at, groups(id, name, description), profiles:sender_id(username, display_name, email)")
+        .select(`
+          id,
+          group_id,
+          content,
+          created_at,
+          profiles:sender_id (
+            id,
+            username,
+            display_name,
+            email
+          ),
+          groups (
+            id,
+            name,
+            description,
+            avatar_color,
+            avatar_emoji,
+            avatar_url,
+            chat_background,
+            created_at
+          )
+        `)
         .in("group_id", groupIds)
         .order("created_at", { ascending: false })
-        .limit(40);
+        .limit(100);
 
       const seen = new Set();
       const chats = [];
 
-      for (const msg of latestMessages || []) {
-        if (seen.has(msg.group_id)) continue;
-        seen.add(msg.group_id);
-        chats.push(msg);
+      for (const message of latestMessages || []) {
+        if (!message?.group_id || seen.has(message.group_id)) continue;
+
+        seen.add(message.group_id);
+
+        const fallbackGroup = groups.find((group) => group.id === message.group_id);
+
+        chats.push({
+          group_id: message.group_id,
+          group: message.groups || fallbackGroup,
+          lastMessage: message.content,
+          lastSender: message.profiles,
+          lastAt: message.created_at,
+          hasMessage: true,
+        });
       }
 
-      for (const group of groups) {
-        if (!seen.has(group.id)) {
-          chats.push({
-            id: `empty-${group.id}`,
-            group_id: group.id,
-            content: "Quiet so far. Someone should say something.",
-            created_at: null,
-            groups: group,
-            profiles: null,
-          });
-        }
-      }
+      const quietGroups = groups
+        .filter((group) => !seen.has(group.id))
+        .map((group) => ({
+          group_id: group.id,
+          group,
+          lastMessage: "Quiet so far. Someone should say something.",
+          lastSender: null,
+          lastAt: group.created_at,
+          hasMessage: false,
+        }));
 
-      setRecentChats(chats);
+      setRecentChats([...chats, ...quietGroups]);
     } else {
       setRecentChats([]);
     }
 
     const { data: inviteRows } = await supabase
       .from("group_members")
-      .select("id, groups(id, name, description), inviter:invited_by(username, display_name, email)")
+      .select(`
+        id,
+        group_id,
+        role,
+        status,
+        groups (
+          id,
+          name,
+          description,
+          avatar_color,
+          avatar_emoji,
+          avatar_url,
+          chat_background,
+          created_at
+        ),
+        inviter:invited_by (
+          id,
+          username,
+          display_name,
+          email
+        )
+      `)
       .eq("user_id", user.id)
       .eq("status", "pending");
 
-    setInvites(inviteRows || []);
+    setInvites((inviteRows || []).filter((row) => row?.id));
 
     const { data: notificationRows } = await supabase
       .from("notifications")
       .select("*")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
-      .limit(10);
+      .limit(8);
 
     setNotifications(notificationRows || []);
   }
@@ -95,7 +185,7 @@ export default function Dashboard() {
   useFocusEffect(
     useCallback(() => {
       loadDashboard();
-    }, [user])
+    }, [user?.id])
   );
 
   async function refresh() {
@@ -105,13 +195,21 @@ export default function Dashboard() {
   }
 
   async function acceptInvite(inviteId) {
-    await supabase.from("group_members").update({ status: "accepted" }).eq("id", inviteId);
-    await loadDashboard();
+    const { error } = await supabase
+      .from("group_members")
+      .update({ status: "accepted" })
+      .eq("id", inviteId);
+
+    if (!error) await loadDashboard();
   }
 
   async function declineInvite(inviteId) {
-    await supabase.from("group_members").delete().eq("id", inviteId);
-    await loadDashboard();
+    const { error } = await supabase
+      .from("group_members")
+      .delete()
+      .eq("id", inviteId);
+
+    if (!error) await loadDashboard();
   }
 
   async function logout() {
@@ -119,101 +217,177 @@ export default function Dashboard() {
     router.replace("/");
   }
 
-  const unread = notifications.filter((n) => !n.read).length;
+  const unreadCount = notifications.filter((item) => !item.read).length;
 
   return (
     <ScrollView
       style={styles.page}
       contentContainerStyle={styles.content}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.violet} />}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.violet} />
+      }
     >
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.logo}>Hangoutly</Text>
-          <Text style={styles.muted}>
-            {profile?.username ? `Good to see you, ${profile.username}` : "Good to see you."}
+          <Text style={styles.subtitle}>
+            Good to see you, {profile?.username || "friend"}.
           </Text>
         </View>
 
-        <View style={styles.bell}>
-          <Text style={styles.bellText}>🔔</Text>
-          {unread > 0 && (
+        <Pressable onPress={() => router.push("/notifications")} style={styles.bell}>
+          <Text style={styles.bellIcon}>🔔</Text>
+
+          {unreadCount > 0 && (
             <View style={styles.badge}>
-              <Text style={styles.badgeText}>{unread}</Text>
+              <Text style={styles.badgeText}>{unreadCount}</Text>
             </View>
           )}
-        </View>
+        </Pressable>
       </View>
 
-      <View style={styles.actions}>
-        <AppButton title="New / Manage Groups" onPress={() => router.push("/groups")} />
-        <AppButton title="Planner" variant="secondary" onPress={() => router.push("/planner")} />
-        <AppButton title="Safety" variant="secondary" onPress={() => router.push("/safety")} />
+      <View style={styles.quickActions}>
+        <AliveCard style={styles.quickCard} onPress={() => router.push("/groups")}>
+          <Text style={styles.quickIcon}>👥</Text>
+          <Text style={styles.quickTitle}>Groups</Text>
+          <Text style={styles.quickText}>Chats and invites</Text>
+        </AliveCard>
+
+        <AliveCard style={styles.quickCard} onPress={() => router.push("/planner")}>
+          <Text style={styles.quickIcon}>📅</Text>
+          <Text style={styles.quickTitle}>Planner</Text>
+          <Text style={styles.quickText}>Tasks and plans</Text>
+        </AliveCard>
+
+        <AliveCard style={styles.quickCard} onPress={() => router.push("/safety")}>
+          <Text style={styles.quickIcon}>🛡️</Text>
+          <Text style={styles.quickTitle}>Safety</Text>
+          <Text style={styles.quickText}>Hold to alert</Text>
+        </AliveCard>
       </View>
 
       {invites.length > 0 && (
         <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Invites waiting</Text>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Invites waiting</Text>
+            <Text style={styles.sectionPill}>{invites.length}</Text>
+          </View>
+
           {invites.map((invite) => (
-            <View key={invite.id} style={styles.invite}>
+            <View key={invite.id} style={styles.inviteCard}>
+              <GroupAvatar
+                name={invite.groups?.name}
+                color={invite.groups?.avatar_color}
+                emoji={invite.groups?.avatar_emoji}
+                avatarUrl={invite.groups?.avatar_url}
+              />
+
               <View style={{ flex: 1 }}>
-                <Text style={styles.cardTitle}>{invite.groups?.name}</Text>
-                <Text style={styles.muted}>Invited by {name(invite.inviter)}</Text>
+                <Text style={styles.cardTitle}>
+                  {invite.groups?.name || "Group invite"}
+                </Text>
+                <Text style={styles.muted}>
+                  Invited by {displayName(invite.inviter)}
+                </Text>
               </View>
-              <View style={styles.row}>
-                <Pressable onPress={() => acceptInvite(invite.id)} style={[styles.pill, { backgroundColor: colors.green }]}>
-                  <Text style={styles.pillText}>Accept</Text>
-                </Pressable>
-                <Pressable onPress={() => declineInvite(invite.id)} style={[styles.pill, { backgroundColor: colors.red }]}>
-                  <Text style={styles.pillText}>No</Text>
-                </Pressable>
-              </View>
+
+              <Pressable
+                onPress={() => acceptInvite(invite.id)}
+                style={[styles.smallButton, { backgroundColor: colors.green }]}
+              >
+                <Text style={styles.smallButtonText}>Yes</Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => declineInvite(invite.id)}
+                style={[styles.smallButton, { backgroundColor: colors.red }]}
+              >
+                <Text style={styles.smallButtonText}>No</Text>
+              </Pressable>
             </View>
           ))}
         </View>
       )}
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Recent Chats</Text>
+        <View style={styles.sectionHeader}>
+          <View>
+            <Text style={styles.sectionTitle}>Recent chats</Text>
+            <Text style={styles.muted}>Where your groups left off.</Text>
+          </View>
+
+          <Pressable onPress={() => router.push("/groups")}>
+            <Text style={styles.viewAll}>View all</Text>
+          </Pressable>
+        </View>
+
         {recentChats.length === 0 ? (
-          <Text style={styles.muted}>No groups yet. Start something small.</Text>
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyTitle}>No groups yet.</Text>
+            <Text style={styles.emptyText}>
+              Start with one group. The app gets better when people are here.
+            </Text>
+
+            <View style={{ marginTop: 14 }}>
+              <AppButton
+                title="Create your first group"
+                onPress={() => router.push("/groups")}
+              />
+            </View>
+          </View>
         ) : (
           recentChats.map((chat) => (
-            <Pressable
-              key={chat.id}
+            <AliveCard
+              key={chat.group_id}
+              style={styles.chatCard}
               onPress={() => router.push(`/group/${chat.group_id}`)}
-              style={({ pressed }) => [styles.chat, pressed && { opacity: 0.75 }]}
             >
-              <View style={styles.avatar}>
-                <Text style={styles.avatarText}>{chat.groups?.name?.[0]?.toUpperCase() || "?"}</Text>
-              </View>
+              <GroupAvatar
+                name={chat.group?.name}
+                color={chat.group?.avatar_color}
+                emoji={chat.group?.avatar_emoji}
+                avatarUrl={chat.group?.avatar_url}
+              />
+
               <View style={{ flex: 1 }}>
-                <Text style={styles.cardTitle}>{chat.groups?.name}</Text>
-                <Text numberOfLines={1} style={styles.muted}>
-                  {chat.profiles ? `${name(chat.profiles)}: ` : ""}
-                  {chat.content}
+                <View style={styles.chatTopLine}>
+                  <Text numberOfLines={1} style={styles.chatTitle}>
+                    {chat.group?.name || "Group"}
+                  </Text>
+
+                  {!!chat.lastAt && (
+                    <Text style={styles.timeText}>{formatTime(chat.lastAt)}</Text>
+                  )}
+                </View>
+
+                <Text numberOfLines={1} style={styles.chatSnippet}>
+                  {chat.lastSender ? `${displayName(chat.lastSender)}: ` : ""}
+                  {chat.lastMessage}
                 </Text>
               </View>
-              {chat.created_at && (
-                <Text style={styles.time}>
-                  {new Date(chat.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-                </Text>
-              )}
-            </Pressable>
+
+              {chat.hasMessage && <View style={styles.activeDot} />}
+            </AliveCard>
           ))
         )}
       </View>
 
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Little signals</Text>
+
         {notifications.length === 0 ? (
-          <Text style={styles.muted}>Quiet night. Nothing new yet.</Text>
+          <Text style={styles.emptyText}>Nothing new yet.</Text>
         ) : (
-          notifications.map((n) => (
-            <View key={n.id} style={styles.notification}>
-              <Text style={styles.cardTitle}>{n.title}</Text>
-              {!!n.body && <Text style={styles.muted}>{n.body}</Text>}
-            </View>
+          notifications.map((item) => (
+            <Pressable
+              key={item.id}
+              onPress={() => item.link && router.push(item.link)}
+              style={[styles.notification, !item.read && styles.unreadNotification]}
+            >
+              <Text style={styles.cardTitle}>{item.title}</Text>
+              {!!item.body && <Text style={styles.muted}>{item.body}</Text>}
+              <Text style={styles.smallMuted}>{formatTime(item.created_at)}</Text>
+            </Pressable>
           ))
         )}
       </View>
@@ -225,53 +399,112 @@ export default function Dashboard() {
 
 const styles = StyleSheet.create({
   page: { flex: 1, backgroundColor: colors.bg },
-  content: { padding: 20, gap: 18, paddingBottom: 40 },
-  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  logo: { color: colors.text, fontSize: 36, fontWeight: "900" },
-  muted: { color: colors.muted },
+  content: { padding: 20, gap: 18, paddingBottom: 44 },
+  header: { flexDirection: "row", alignItems: "center", gap: 14, marginTop: 10 },
+  logo: { color: colors.text, fontSize: 38, fontWeight: "900" },
+  subtitle: { color: colors.muted, marginTop: 4 },
   bell: {
-    height: 50,
-    width: 50,
-    borderRadius: 18,
+    height: 54,
+    width: 54,
+    borderRadius: 19,
     backgroundColor: colors.card,
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: "center",
     justifyContent: "center",
-    position: "relative",
   },
-  bellText: { fontSize: 22 },
+  bellIcon: { fontSize: 23 },
   badge: {
     position: "absolute",
     top: -5,
     right: -5,
-    backgroundColor: colors.red,
     minWidth: 22,
     height: 22,
-    borderRadius: 99,
+    borderRadius: 999,
+    backgroundColor: colors.red,
     alignItems: "center",
     justifyContent: "center",
+    paddingHorizontal: 5,
   },
   badgeText: { color: colors.text, fontWeight: "900", fontSize: 12 },
-  actions: { gap: 10 },
-  card: {
+  quickActions: { flexDirection: "row", gap: 10 },
+  quickCard: {
+    flex: 1,
     backgroundColor: colors.card,
-    borderWidth: 1,
     borderColor: colors.border,
+    borderWidth: 1,
     borderRadius: radii.lg,
-    padding: 18,
-    gap: 12,
+    padding: 14,
+    minHeight: 118,
+    justifyContent: "space-between",
     ...shadow,
   },
-  sectionTitle: { color: colors.text, fontSize: 23, fontWeight: "900" },
-  cardTitle: { color: colors.text, fontSize: 16, fontWeight: "800" },
-  invite: { backgroundColor: colors.bg2, borderRadius: 20, padding: 14, flexDirection: "row", alignItems: "center", gap: 10 },
-  row: { flexDirection: "row", gap: 8 },
-  pill: { borderRadius: 12, paddingHorizontal: 12, paddingVertical: 9 },
-  pillText: { color: colors.text, fontWeight: "900", fontSize: 12 },
-  chat: { backgroundColor: colors.bg2, borderRadius: 20, padding: 14, flexDirection: "row", alignItems: "center", gap: 12 },
-  avatar: { height: 48, width: 48, borderRadius: 18, backgroundColor: colors.violet, alignItems: "center", justifyContent: "center" },
-  avatarText: { color: colors.text, fontSize: 18, fontWeight: "900" },
-  time: { color: colors.muted, fontSize: 12 },
-  notification: { backgroundColor: colors.bg2, borderRadius: 18, padding: 14 },
+  quickIcon: { fontSize: 24 },
+  quickTitle: { color: colors.text, fontWeight: "900", fontSize: 15 },
+  quickText: { color: colors.muted, fontSize: 12, lineHeight: 16 },
+  card: {
+    backgroundColor: colors.card,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radii.xl,
+    padding: 18,
+    gap: 13,
+    ...shadow,
+  },
+  sectionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 12,
+    alignItems: "center",
+  },
+  sectionTitle: { color: colors.text, fontSize: 24, fontWeight: "900" },
+  sectionPill: {
+    backgroundColor: colors.violet,
+    color: colors.text,
+    overflow: "hidden",
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    fontWeight: "900",
+  },
+  viewAll: { color: colors.soft, fontWeight: "900" },
+  muted: { color: colors.muted },
+  smallMuted: { color: colors.muted, fontSize: 12, marginTop: 3 },
+  cardTitle: { color: colors.text, fontWeight: "900", fontSize: 16 },
+  inviteCard: {
+    backgroundColor: colors.bg2,
+    borderRadius: 22,
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  smallButton: { borderRadius: 13, paddingHorizontal: 11, paddingVertical: 9 },
+  smallButtonText: { color: colors.text, fontWeight: "900", fontSize: 12 },
+  chatCard: {
+    backgroundColor: colors.bg2,
+    borderRadius: 23,
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderWidth: 1,
+    borderColor: "rgba(242,214,162,0.18)",
+  },
+  chatTopLine: { flexDirection: "row", gap: 10, alignItems: "center" },
+  chatTitle: { color: colors.text, fontWeight: "900", fontSize: 17, flex: 1 },
+  timeText: { color: colors.muted, fontSize: 12 },
+  chatSnippet: { color: colors.muted, marginTop: 3 },
+  activeDot: { height: 9, width: 9, borderRadius: 999, backgroundColor: colors.green },
+  notification: {
+    backgroundColor: colors.bg2,
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  unreadNotification: { borderColor: colors.violet },
+  emptyState: { backgroundColor: colors.bg2, borderRadius: 24, padding: 18 },
+  emptyTitle: { color: colors.text, fontWeight: "900", fontSize: 17 },
+  emptyText: { color: colors.muted, marginTop: 5, lineHeight: 20 },
 });
