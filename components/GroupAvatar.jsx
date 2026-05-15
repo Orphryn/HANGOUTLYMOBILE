@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Image, StyleSheet, Text, View } from "react-native";
 
 export default function GroupAvatar({
@@ -7,7 +8,10 @@ export default function GroupAvatar({
   avatarUrl,
   size = 52,
 }) {
+  const [failed, setFailed] = useState(false);
   const letter = name?.[0]?.toUpperCase() || "?";
+  const radius = Math.max(12, size / 2.6);
+  const showImage = !!avatarUrl && !failed;
 
   return (
     <View
@@ -17,18 +21,15 @@ export default function GroupAvatar({
           backgroundColor: color || "#7C5CFF",
           width: size,
           height: size,
-          borderRadius: size / 2.6,
+          borderRadius: radius,
         },
       ]}
     >
-      {avatarUrl ? (
+      {showImage ? (
         <Image
           source={{ uri: avatarUrl }}
-          style={{
-            width: size,
-            height: size,
-            borderRadius: size / 2.6,
-          }}
+          onError={() => setFailed(true)}
+          style={{ width: size, height: size, borderRadius: radius }}
         />
       ) : (
         <Text style={[styles.text, { fontSize: size * 0.42 }]}>

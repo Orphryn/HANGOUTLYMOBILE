@@ -27,3 +27,28 @@ export const shadow = {
   shadowOffset: { width: 0, height: 10 },
   elevation: 8,
 };
+
+// Keeps the default Expo template files from crashing if they still import Colors/Fonts.
+export const Colors = {
+  light: {
+    text: "#111827",
+    background: "#ffffff",
+    tint: colors.violet,
+    icon: "#687076",
+    tabIconDefault: "#687076",
+    tabIconSelected: colors.violet,
+  },
+  dark: {
+    text: colors.text,
+    background: colors.bg,
+    tint: colors.violet2,
+    icon: colors.muted,
+    tabIconDefault: colors.muted,
+    tabIconSelected: colors.violet2,
+  },
+};
+
+export const Fonts = {
+  rounded: undefined,
+  mono: "monospace",
+};

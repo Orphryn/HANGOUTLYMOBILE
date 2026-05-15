@@ -5,8 +5,9 @@ export default function AppInput(props) {
   return (
     <TextInput
       placeholderTextColor={colors.muted}
-      style={styles.input}
+      style={[styles.input, props.style]}
       autoCapitalize="none"
+      autoCorrect={false}
       {...props}
     />
   );

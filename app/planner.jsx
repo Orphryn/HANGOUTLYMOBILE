@@ -221,19 +221,80 @@ export default function Planner() {
     }
   }
 
-  function makeDateTime(date, time) {
-    const [hourRaw, minuteRaw] = time ? time.split(":") : ["12", "00"];
-    const hour = Number(hourRaw || 12);
-    const minute = Number(minuteRaw || 0);
+  function parseTimeInput(value, allowBlank = true) {
+    const clean = String(value || "").trim().toLowerCase();
 
-    return new Date(
+    if (!clean) {
+      if (allowBlank) return { hour: 12, minute: 0, normalized: null };
+      return { error: "Enter a time like 18:30 or 6pm." };
+    }
+
+    let match = clean.match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/);
+    let hour;
+    let minute;
+    let suffix;
+
+    if (match) {
+      hour = Number(match[1]);
+      minute = Number(match[2]);
+      suffix = match[3];
+    } else {
+      match = clean.match(/^(\d{1,2})\s*(am|pm)$/);
+
+      if (!match) {
+        return { error: "That looks like a date, not a time. Use 18:30, 6pm, or leave it blank." };
+      }
+
+      hour = Number(match[1]);
+      minute = 0;
+      suffix = match[2];
+    }
+
+    if (suffix) {
+      if (hour < 1 || hour > 12) return { error: "AM/PM times must be between 1 and 12." };
+      if (suffix === "pm" && hour !== 12) hour += 12;
+      if (suffix === "am" && hour === 12) hour = 0;
+    }
+
+    if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      return { error: "Use a real time like 18:30 or 6pm." };
+    }
+
+    return {
+      hour,
+      minute,
+      normalized: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
+    };
+  }
+
+  function makeDateTime(date, time, allowBlankTime = true) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+      return { error: "Pick a valid date from the calendar first." };
+    }
+
+    const parsedTime = parseTimeInput(time, allowBlankTime);
+
+    if (parsedTime.error) {
+      return { error: parsedTime.error };
+    }
+
+    const result = new Date(
       date.getFullYear(),
       date.getMonth(),
       date.getDate(),
-      hour,
-      minute,
+      parsedTime.hour,
+      parsedTime.minute,
       0
     );
+
+    if (Number.isNaN(result.getTime())) {
+      return { error: "That date or time is invalid." };
+    }
+
+    return {
+      date: result,
+      time: parsedTime.normalized,
+    };
   }
 
   async function notifyGroupMembers(groupId, title, body, link) {
@@ -267,10 +328,25 @@ export default function Planner() {
       return Alert.alert("Missing title", "Give the event a title.");
     }
 
-    const startsAt = makeDateTime(selectedDate, eventAllDay ? "" : eventStartTime);
-    const endsAt = eventEndTime
-      ? makeDateTime(selectedDate, eventEndTime)
-      : new Date(startsAt.getTime() + 60 * 60 * 1000);
+    const start = makeDateTime(selectedDate, eventAllDay ? "" : eventStartTime, true);
+
+    if (start.error) {
+      return Alert.alert("Invalid date or time", start.error);
+    }
+
+    let endDate = new Date(start.date.getTime() + 60 * 60 * 1000);
+    let normalizedEndTime = null;
+
+    if (!eventAllDay && eventEndTime.trim()) {
+      const end = makeDateTime(selectedDate, eventEndTime, true);
+
+      if (end.error) {
+        return Alert.alert("Invalid end time", end.error);
+      }
+
+      endDate = end.date;
+      normalizedEndTime = end.time;
+    }
 
     const { data: createdEvent, error } = await supabase
       .from("planner_events")
@@ -278,10 +354,10 @@ export default function Planner() {
         creator_id: user.id,
         group_id: eventGroupId || null,
         title,
-        starts_at: startsAt.toISOString(),
-        ends_at: endsAt.toISOString(),
-        start_time: eventAllDay ? null : eventStartTime || null,
-        end_time: eventAllDay ? null : eventEndTime || null,
+        starts_at: start.date.toISOString(),
+        ends_at: endDate.toISOString(),
+        start_time: eventAllDay ? null : start.time,
+        end_time: eventAllDay ? null : normalizedEndTime,
         is_all_day: eventAllDay,
         completed: false,
       })
@@ -315,7 +391,7 @@ export default function Planner() {
         group_id: eventGroupId,
         sender_id: user.id,
         content: `📅 Event created: ${title} — ${prettyDate(selectedDate)}${
-          eventAllDay ? " all day" : eventStartTime ? ` at ${eventStartTime}` : ""
+          eventAllDay ? " all day" : start.time ? ` at ${start.time}` : ""
         }`,
       });
     }
@@ -337,7 +413,11 @@ export default function Planner() {
       return Alert.alert("Missing task", "Write the task first.");
     }
 
-    const dueAt = makeDateTime(selectedDate, taskDueTime);
+    const due = makeDateTime(selectedDate, taskDueTime, true);
+
+    if (due.error) {
+      return Alert.alert("Invalid date or time", due.error);
+    }
 
     const { data: createdTask, error } = await supabase
       .from("planner_tasks")
@@ -345,8 +425,8 @@ export default function Planner() {
         creator_id: user.id,
         group_id: taskGroupId || null,
         title,
-        due_at: dueAt.toISOString(),
-        due_time: taskDueTime || null,
+        due_at: due.date.toISOString(),
+        due_time: due.time,
         completed: false,
       })
       .select("*")
@@ -379,7 +459,7 @@ export default function Planner() {
         group_id: taskGroupId,
         sender_id: user.id,
         content: `✅ Task created: ${title} — due ${prettyDate(selectedDate)}${
-          taskDueTime ? ` at ${taskDueTime}` : ""
+          due.time ? ` at ${due.time}` : ""
         }`,
       });
     }
