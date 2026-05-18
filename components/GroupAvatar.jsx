@@ -1,53 +1,98 @@
-import { useState } from "react";
 import { Image, StyleSheet, Text, View } from "react-native";
+import { colors, shadow } from "../constants/theme";
 
 export default function GroupAvatar({
-  name = "?",
-  color = "#7C5CFF",
-  emoji,
+  name,
+  color = colors.violet,
+  emoji = "✨",
   avatarUrl,
   size = 52,
+  stacked = false,
 }) {
-  const [failed, setFailed] = useState(false);
-  const letter = name?.[0]?.toUpperCase() || "?";
-  const radius = Math.max(12, size / 2.6);
-  const showImage = !!avatarUrl && !failed;
+  const safeName = name || "Group";
+  const initials = safeName
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+
+  const fallbackText = emoji || initials || "G";
 
   return (
     <View
       style={[
-        styles.avatar,
+        styles.shell,
         {
-          backgroundColor: color || "#7C5CFF",
           width: size,
           height: size,
-          borderRadius: radius,
+          borderRadius: size * 0.28,
         },
+        stacked && styles.stacked,
       ]}
     >
-      {showImage ? (
+      {avatarUrl ? (
         <Image
           source={{ uri: avatarUrl }}
-          onError={() => setFailed(true)}
-          style={{ width: size, height: size, borderRadius: radius }}
+          style={{
+            width: size,
+            height: size,
+            borderRadius: size * 0.28,
+          }}
         />
       ) : (
-        <Text style={[styles.text, { fontSize: size * 0.42 }]}>
-          {emoji || letter}
-        </Text>
+        <View
+          style={[
+            styles.fallback,
+            {
+              width: size,
+              height: size,
+              borderRadius: size * 0.28,
+              backgroundColor: color || colors.violet,
+            },
+          ]}
+        >
+          <View style={styles.innerGlow} />
+          <Text
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            style={[styles.emoji, { fontSize: size * 0.34 }]}
+          >
+            {fallbackText}
+          </Text>
+        </View>
       )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  avatar: {
+  shell: {
+    backgroundColor: colors.card2,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: colors.border,
+    ...shadow,
+  },
+  fallback: {
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
   },
-  text: {
-    color: "white",
+  innerGlow: {
+    position: "absolute",
+    width: "120%",
+    height: "120%",
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.16)",
+    top: "-58%",
+    right: "-48%",
+  },
+  emoji: {
     fontWeight: "900",
+    color: colors.text,
+  },
+  stacked: {
+    marginLeft: -10,
   },
 });

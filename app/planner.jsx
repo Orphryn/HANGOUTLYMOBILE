@@ -1,8 +1,11 @@
-import { useFocusEffect } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
 import {
   Alert,
+  Modal,
+  Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -11,1072 +14,1935 @@ import {
 
 import AppButton from "../components/AppButton";
 import AppInput from "../components/AppInput";
+import BottomNav from "../components/BottomNav";
 import GroupAvatar from "../components/GroupAvatar";
-import { colors, radii, shadow } from "../constants/theme";
+import ProfileAvatar from "../components/ProfileAvatar";
+import { colors, shadow, softShadow } from "../constants/theme";
 import { useAuth } from "../context/AuthContext";
 import { supabase } from "../lib/supabase";
 
-const MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
+const planColors = [
+  "#7C5CFF",
+  "#2DD4BF",
+  "#FFB86B",
+  "#FB7185",
+  "#60A5FA",
+  "#A78BFA",
+  "#F2D6A2",
 ];
 
-const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-const quickTimes = ["09:00", "12:00", "15:00", "18:00", "20:00"];
+function displayName(profile) {
+  if (!profile) return "Friend";
+  return profile.display_name || profile.username || profile.email || "Friend";
+}
 
 function toDateKey(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
+
   return `${year}-${month}-${day}`;
 }
 
-function prettyDate(date) {
+function todayKey() {
+  return toDateKey(new Date());
+}
+
+function parseDateInput(value) {
+  const clean = String(value || "").trim();
+
+  if (!clean) {
+    return { error: "Enter a date like 2026-05-16 or 05/16/2026." };
+  }
+
+  let year;
+  let month;
+  let day;
+
+  const isoMatch = clean.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const slashMatch = clean.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+
+  if (isoMatch) {
+    year = Number(isoMatch[1]);
+    month = Number(isoMatch[2]);
+    day = Number(isoMatch[3]);
+  } else if (slashMatch) {
+    month = Number(slashMatch[1]);
+    day = Number(slashMatch[2]);
+    year = Number(slashMatch[3]);
+  } else {
+    return { error: "Use a real date like 2026-05-16 or 05/16/2026." };
+  }
+
+  const date = new Date(year, month - 1, day);
+
+  const valid =
+    date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day;
+
+  if (!valid) return { error: "That date is not valid." };
+
+  return {
+    year,
+    month,
+    day,
+    dateKey: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(
+      2,
+      "0"
+    )}`,
+  };
+}
+
+function parseTimeInput(value, allowBlank = true) {
+  const clean = String(value || "").trim().toLowerCase();
+
+  if (!clean) {
+    if (allowBlank) {
+      return {
+        hour: 12,
+        minute: 0,
+        normalized: null,
+      };
+    }
+
+    return { error: "Enter a time like 6pm or 18:30." };
+  }
+
+  let match = clean.match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/);
+  let hour;
+  let minute;
+  let suffix;
+
+  if (match) {
+    hour = Number(match[1]);
+    minute = Number(match[2]);
+    suffix = match[3];
+  } else {
+    match = clean.match(/^(\d{1,2})\s*(am|pm)$/);
+
+    if (!match) {
+      return {
+        error: "Use a time like 6pm, 6:30pm, 18:30, or leave it blank.",
+      };
+    }
+
+    hour = Number(match[1]);
+    minute = 0;
+    suffix = match[2];
+  }
+
+  if (suffix) {
+    if (hour < 1 || hour > 12) {
+      return { error: "AM/PM times must be between 1 and 12." };
+    }
+
+    if (suffix === "pm" && hour !== 12) hour += 12;
+    if (suffix === "am" && hour === 12) hour = 0;
+  }
+
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return { error: "Use a real time like 6pm or 18:30." };
+  }
+
+  return {
+    hour,
+    minute,
+    normalized: `${String(hour).padStart(2, "0")}:${String(minute).padStart(
+      2,
+      "0"
+    )}`,
+  };
+}
+
+function makeDateTime(dateInput, timeInput, allowBlankTime = true) {
+  const parsedDate = parseDateInput(dateInput);
+
+  if (parsedDate.error) return { error: parsedDate.error };
+
+  const parsedTime = parseTimeInput(timeInput, allowBlankTime);
+
+  if (parsedTime.error) return { error: parsedTime.error };
+
+  const date = new Date(
+    parsedDate.year,
+    parsedDate.month - 1,
+    parsedDate.day,
+    parsedTime.hour,
+    parsedTime.minute,
+    0
+  );
+
+  if (Number.isNaN(date.getTime())) {
+    return { error: "That date or time is invalid." };
+  }
+
+  return {
+    date,
+    dateKey: parsedDate.dateKey,
+    time: parsedTime.normalized,
+  };
+}
+
+function formatStoredTime(time) {
+  if (!time) return "";
+
+  const [hour, minute] = String(time).split(":").map(Number);
+
+  if (
+    Number.isNaN(hour) ||
+    Number.isNaN(minute) ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return "";
+  }
+
+  const date = new Date();
+  date.setHours(hour, minute, 0, 0);
+
+  return date.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatDate(value) {
+  if (!value) return "No date";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "No date";
+
+  const sameDay = toDateKey(date) === todayKey();
+
+  if (sameDay) return "Today";
+
   return date.toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "long",
+    weekday: "short",
+    month: "short",
     day: "numeric",
   });
 }
 
-function buildMonthGrid(year, month) {
-  const first = new Date(year, month, 1);
-  const startDay = first.getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const prevDays = new Date(year, month, 0).getDate();
-  const cells = [];
+function formatDateInput(value) {
+  if (!value) return todayKey();
 
-  for (let i = startDay - 1; i >= 0; i--) {
-    cells.push({
-      day: prevDays - i,
-      currentMonth: false,
-      date: new Date(year, month - 1, prevDays - i),
-    });
-  }
+  const date = new Date(value);
 
-  for (let day = 1; day <= daysInMonth; day++) {
-    cells.push({
-      day,
-      currentMonth: true,
-      date: new Date(year, month, day),
-    });
-  }
+  if (Number.isNaN(date.getTime())) return todayKey();
 
-  while (cells.length % 7 !== 0) {
-    const nextDay = cells.length - (startDay + daysInMonth) + 1;
-    cells.push({
-      day: nextDay,
-      currentMonth: false,
-      date: new Date(year, month + 1, nextDay),
-    });
-  }
-
-  return cells;
+  return toDateKey(date);
 }
 
-function groupNameById(groups, groupId) {
-  return groups.find((group) => group.id === groupId)?.name || "your group";
+function formatEventTime(event) {
+  if (event.is_all_day) return "All day";
+
+  const start = event.start_time ? formatStoredTime(event.start_time) : "";
+  const end = event.end_time ? formatStoredTime(event.end_time) : "";
+
+  if (start && end) return `${start} - ${end}`;
+  if (start) return start;
+
+  return "No time";
+}
+
+function formatTaskTime(task) {
+  return task.due_time ? formatStoredTime(task.due_time) : "No time";
+}
+
+function buildMonthDays(currentMonthDate) {
+  const year = currentMonthDate.getFullYear();
+  const month = currentMonthDate.getMonth();
+
+  const firstDay = new Date(year, month, 1);
+  const startDay = firstDay.getDay();
+
+  const start = new Date(year, month, 1 - startDay);
+
+  const days = [];
+
+  for (let i = 0; i < 42; i++) {
+    const day = new Date(start);
+    day.setDate(start.getDate() + i);
+
+    days.push({
+      date: day,
+      key: toDateKey(day),
+      inMonth: day.getMonth() === month,
+      dayNumber: day.getDate(),
+      isToday: toDateKey(day) === todayKey(),
+    });
+  }
+
+  return days;
 }
 
 export default function Planner() {
   const { user } = useAuth();
-  const today = new Date();
 
-  const [selectedDate, setSelectedDate] = useState(today);
-  const [visibleMonth, setVisibleMonth] = useState(today.getMonth());
-  const [visibleYear, setVisibleYear] = useState(today.getFullYear());
-
+  const [profile, setProfile] = useState(null);
   const [groups, setGroups] = useState([]);
-  const [events, setEvents] = useState([]);
   const [tasks, setTasks] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [creatorMap, setCreatorMap] = useState({});
 
-  const [mode, setMode] = useState("event");
+  const [activeView, setActiveView] = useState("calendar");
+  const [scopeFilter, setScopeFilter] = useState("all");
+  const [selectedDateKey, setSelectedDateKey] = useState(todayKey());
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+
+  const [editingType, setEditingType] = useState(null);
+  const [editingItem, setEditingItem] = useState(null);
+
+  const [editTitle, setEditTitle] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editDate, setEditDate] = useState(todayKey());
+  const [editStartTime, setEditStartTime] = useState("");
+  const [editEndTime, setEditEndTime] = useState("");
+  const [editAllDay, setEditAllDay] = useState(false);
+  const [editColor, setEditColor] = useState("#7C5CFF");
+  const [editCompleted, setEditCompleted] = useState(false);
+
+  const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
 
-  const [eventTitle, setEventTitle] = useState("");
-  const [eventGroupId, setEventGroupId] = useState("");
-  const [eventStartTime, setEventStartTime] = useState("");
-  const [eventEndTime, setEventEndTime] = useState("");
-  const [eventAllDay, setEventAllDay] = useState(false);
+  const groupMap = useMemo(() => {
+    const map = {};
 
-  const [taskTitle, setTaskTitle] = useState("");
-  const [taskGroupId, setTaskGroupId] = useState("");
-  const [taskDueTime, setTaskDueTime] = useState("");
+    for (const group of groups) {
+      map[group.id] = group;
+    }
 
-  const selectedKey = toDateKey(selectedDate);
+    return map;
+  }, [groups]);
 
-  const calendarCells = useMemo(
-    () => buildMonthGrid(visibleYear, visibleMonth),
-    [visibleYear, visibleMonth]
-  );
+  const monthDays = useMemo(() => buildMonthDays(currentMonth), [currentMonth]);
 
-  async function loadPlanner() {
+  const visibleTasks = useMemo(() => {
+    return tasks.filter((task) => {
+      if (scopeFilter === "personal") return !task.group_id;
+      if (scopeFilter === "group") return !!task.group_id;
+      return true;
+    });
+  }, [tasks, scopeFilter]);
+
+  const visibleEvents = useMemo(() => {
+    return events.filter((event) => {
+      if (scopeFilter === "personal") return !event.group_id;
+      if (scopeFilter === "group") return !!event.group_id;
+      return true;
+    });
+  }, [events, scopeFilter]);
+
+  const selectedDayTasks = useMemo(() => {
+    return visibleTasks
+      .filter((task) => toDateKey(new Date(task.due_at)) === selectedDateKey)
+      .sort((a, b) => new Date(a.due_at) - new Date(b.due_at));
+  }, [visibleTasks, selectedDateKey]);
+
+  const selectedDayEvents = useMemo(() => {
+    return visibleEvents
+      .filter((event) => toDateKey(new Date(event.starts_at)) === selectedDateKey)
+      .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
+  }, [visibleEvents, selectedDateKey]);
+
+  const upcomingEvents = useMemo(() => {
+    const now = Date.now();
+
+    return visibleEvents
+      .filter((event) => {
+        const startsAt = new Date(event.starts_at).getTime();
+        return !Number.isNaN(startsAt) && startsAt >= now - 60 * 60 * 1000;
+      })
+      .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at));
+  }, [visibleEvents]);
+
+  const openTasks = useMemo(() => {
+    return visibleTasks
+      .filter((task) => !task.completed)
+      .sort((a, b) => new Date(a.due_at) - new Date(b.due_at));
+  }, [visibleTasks]);
+
+  const completedTasks = useMemo(() => {
+    return visibleTasks
+      .filter((task) => task.completed)
+      .sort((a, b) => new Date(b.due_at) - new Date(a.due_at));
+  }, [visibleTasks]);
+
+  const monthLabel = currentMonth.toLocaleDateString(undefined, {
+    month: "long",
+    year: "numeric",
+  });
+
+  async function updateLastSeen() {
     if (!user?.id) return;
 
-    const { data: groupRows } = await supabase
+    await supabase
+      .from("profiles")
+      .update({ last_seen_at: new Date().toISOString() })
+      .eq("id", user.id);
+  }
+
+  async function loadProfile() {
+    if (!user?.id) return;
+
+    const { data } = await supabase
+      .from("profiles")
+      .select("id, username, display_name, email, avatar_url")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    setProfile(data);
+  }
+
+  async function loadGroups() {
+    if (!user?.id) return [];
+
+    const { data, error } = await supabase
       .from("group_members")
-      .select(`
+      .select(
+        `
+        id,
         group_id,
+        role,
+        status,
+        muted,
+        pinned,
         groups (
           id,
           name,
+          description,
           avatar_color,
           avatar_emoji,
-          avatar_url
+          avatar_url,
+          chat_background,
+          created_at
         )
-      `)
+      `
+      )
       .eq("user_id", user.id)
       .eq("status", "accepted");
 
+    if (error) {
+      Alert.alert("Could not load groups", error.message);
+      return [];
+    }
+
     const cleanGroups =
-      groupRows?.map((row) => row.groups).filter((group) => group?.id) || [];
+      data
+        ?.map((row) => ({
+          ...(row.groups || {}),
+          membership_id: row.id,
+          role: row.role,
+          muted: row.muted === true,
+          pinned: row.pinned === true,
+        }))
+        .filter((group) => group?.id) || [];
 
     setGroups(cleanGroups);
 
-    const groupIds = cleanGroups.map((group) => group.id);
+    return cleanGroups;
+  }
 
-    const { data: eventRows } = await supabase
-      .from("planner_events")
-      .select(`
-        id,
-        creator_id,
-        group_id,
-        title,
-        description,
-        starts_at,
-        ends_at,
-        start_time,
-        end_time,
-        is_all_day,
-        completed,
-        created_at,
-        groups (
-          id,
-          name,
-          avatar_color,
-          avatar_emoji,
-          avatar_url
-        )
-      `)
-      .or(
-        groupIds.length
-          ? `creator_id.eq.${user.id},group_id.in.(${groupIds.join(",")})`
-          : `creator_id.eq.${user.id}`
-      )
-      .order("starts_at", { ascending: true });
+  async function attachCreators(items) {
+    const ids = [
+      ...new Set((items || []).map((item) => item.creator_id).filter(Boolean)),
+    ];
 
-    setEvents(eventRows || []);
+    if (ids.length === 0) {
+      setCreatorMap({});
+      return;
+    }
 
-    const { data: taskRows } = await supabase
-      .from("planner_tasks")
-      .select(`
-        id,
-        creator_id,
-        group_id,
-        title,
-        due_at,
-        due_time,
-        completed,
-        created_at,
-        groups (
-          id,
-          name,
-          avatar_color,
-          avatar_emoji,
-          avatar_url
-        )
-      `)
-      .or(
-        groupIds.length
-          ? `creator_id.eq.${user.id},group_id.in.(${groupIds.join(",")})`
-          : `creator_id.eq.${user.id}`
-      )
-      .order("created_at", { ascending: false });
+    const { data } = await supabase
+      .from("profiles")
+      .select("id, username, display_name, email, avatar_url")
+      .in("id", ids);
 
-    setTasks(taskRows || []);
+    const map = {};
+
+    for (const row of data || []) {
+      map[row.id] = row;
+    }
+
+    setCreatorMap(map);
+  }
+
+  async function loadPlans(groupRows) {
+    const groupIds = groupRows.map((group) => group.id);
+
+    const [{ data: taskRows, error: taskError }, { data: eventRows, error: eventError }] =
+      await Promise.all([
+        supabase
+          .from("planner_tasks")
+          .select(
+            `
+            id,
+            creator_id,
+            group_id,
+            title,
+            due_at,
+            due_time,
+            completed,
+            color,
+            created_at
+          `
+          )
+          .order("due_at", { ascending: true }),
+        supabase
+          .from("planner_events")
+          .select(
+            `
+            id,
+            creator_id,
+            group_id,
+            title,
+            description,
+            starts_at,
+            ends_at,
+            start_time,
+            end_time,
+            is_all_day,
+            completed,
+            color,
+            created_at
+          `
+          )
+          .order("starts_at", { ascending: true }),
+      ]);
+
+    if (taskError) {
+      Alert.alert("Could not load tasks", taskError.message);
+      setTasks([]);
+    } else {
+      const cleanTasks =
+        taskRows?.filter(
+          (task) =>
+            task.creator_id === user.id ||
+            !task.group_id ||
+            groupIds.includes(task.group_id)
+        ) || [];
+
+      setTasks(cleanTasks);
+    }
+
+    if (eventError) {
+      Alert.alert("Could not load events", eventError.message);
+      setEvents([]);
+    } else {
+      const cleanEvents =
+        eventRows?.filter(
+          (event) =>
+            event.creator_id === user.id ||
+            !event.group_id ||
+            groupIds.includes(event.group_id)
+        ) || [];
+
+      setEvents(cleanEvents);
+    }
+
+    await attachCreators([...(taskRows || []), ...(eventRows || [])]);
+  }
+
+  async function loadAll() {
+    if (!user?.id) {
+      router.replace("/login");
+      return;
+    }
+
+    await updateLastSeen();
+    await loadProfile();
+
+    const groupRows = await loadGroups();
+
+    await loadPlans(groupRows);
   }
 
   useFocusEffect(
     useCallback(() => {
-      loadPlanner();
+      loadAll();
     }, [user?.id])
   );
 
+  async function refresh() {
+    setRefreshing(true);
+    await loadAll();
+    setRefreshing(false);
+  }
+
   function previousMonth() {
-    if (visibleMonth === 0) {
-      setVisibleMonth(11);
-      setVisibleYear((year) => year - 1);
-    } else {
-      setVisibleMonth((month) => month - 1);
-    }
+    setCurrentMonth((value) => new Date(value.getFullYear(), value.getMonth() - 1, 1));
   }
 
   function nextMonth() {
-    if (visibleMonth === 11) {
-      setVisibleMonth(0);
-      setVisibleYear((year) => year + 1);
+    setCurrentMonth((value) => new Date(value.getFullYear(), value.getMonth() + 1, 1));
+  }
+
+  function getCreatorName(item) {
+    if (item.creator_id === user?.id) return "You";
+    return displayName(creatorMap[item.creator_id]);
+  }
+
+  function getScopeLabel(item) {
+    if (!item.group_id) return "Personal";
+    return groupMap[item.group_id]?.name || "Group";
+  }
+
+  function canEdit(item) {
+    return item.creator_id === user?.id;
+  }
+
+  function openEdit(type, item) {
+    setEditingType(type);
+    setEditingItem(item);
+
+    setEditTitle(item.title || "");
+    setEditColor(item.color || (type === "event" ? "#7C5CFF" : "#2DD4BF"));
+
+    if (type === "event") {
+      setEditDescription(item.description || "");
+      setEditDate(formatDateInput(item.starts_at));
+      setEditStartTime(item.start_time || "");
+      setEditEndTime(item.end_time || "");
+      setEditAllDay(item.is_all_day === true);
+      setEditCompleted(item.completed === true);
     } else {
-      setVisibleMonth((month) => month + 1);
+      setEditDescription("");
+      setEditDate(formatDateInput(item.due_at));
+      setEditStartTime(item.due_time || "");
+      setEditEndTime("");
+      setEditAllDay(false);
+      setEditCompleted(item.completed === true);
     }
   }
 
-  function parseTimeInput(value, allowBlank = true) {
-    const clean = String(value || "").trim().toLowerCase();
-
-    if (!clean) {
-      if (allowBlank) return { hour: 12, minute: 0, normalized: null };
-      return { error: "Enter a time like 18:30 or 6pm." };
-    }
-
-    let match = clean.match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/);
-    let hour;
-    let minute;
-    let suffix;
-
-    if (match) {
-      hour = Number(match[1]);
-      minute = Number(match[2]);
-      suffix = match[3];
-    } else {
-      match = clean.match(/^(\d{1,2})\s*(am|pm)$/);
-
-      if (!match) {
-        return { error: "That looks like a date, not a time. Use 18:30, 6pm, or leave it blank." };
-      }
-
-      hour = Number(match[1]);
-      minute = 0;
-      suffix = match[2];
-    }
-
-    if (suffix) {
-      if (hour < 1 || hour > 12) return { error: "AM/PM times must be between 1 and 12." };
-      if (suffix === "pm" && hour !== 12) hour += 12;
-      if (suffix === "am" && hour === 12) hour = 0;
-    }
-
-    if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-      return { error: "Use a real time like 18:30 or 6pm." };
-    }
-
-    return {
-      hour,
-      minute,
-      normalized: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
-    };
+  function closeEdit() {
+    setEditingType(null);
+    setEditingItem(null);
+    setEditTitle("");
+    setEditDescription("");
+    setEditDate(todayKey());
+    setEditStartTime("");
+    setEditEndTime("");
+    setEditAllDay(false);
+    setEditColor("#7C5CFF");
+    setEditCompleted(false);
   }
 
-  function makeDateTime(date, time, allowBlankTime = true) {
-    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
-      return { error: "Pick a valid date from the calendar first." };
-    }
-
-    const parsedTime = parseTimeInput(time, allowBlankTime);
-
-    if (parsedTime.error) {
-      return { error: parsedTime.error };
-    }
-
-    const result = new Date(
-      date.getFullYear(),
-      date.getMonth(),
-      date.getDate(),
-      parsedTime.hour,
-      parsedTime.minute,
-      0
-    );
-
-    if (Number.isNaN(result.getTime())) {
-      return { error: "That date or time is invalid." };
-    }
-
-    return {
-      date: result,
-      time: parsedTime.normalized,
-    };
-  }
-
-  async function notifyGroupMembers(groupId, title, body, link) {
+  async function notifyGroupMembers(groupId, title, body) {
     if (!groupId) return;
 
-    const { data: members } = await supabase
-      .from("group_members")
-      .select("user_id")
-      .eq("group_id", groupId)
-      .eq("status", "accepted");
+    const { error } = await supabase.rpc("notify_group_members", {
+      input_group_id: groupId,
+      input_title: title,
+      input_body: body,
+      input_link: `/group/${groupId}`,
+    });
 
-    const rows =
-      members?.map((member) => ({
-        user_id: member.user_id,
-        type: "group_activity",
-        title,
-        body,
-        read: false,
-        link,
-      })) || [];
-
-    if (rows.length > 0) {
-      await supabase.from("notifications").insert(rows);
+    if (error) {
+      console.log("Notification RPC failed:", error.message);
     }
   }
 
-  async function createEvent() {
-    const title = eventTitle.trim();
+  async function saveEdit() {
+    if (!editingItem || !editingType) return;
 
-    if (!title) {
-      return Alert.alert("Missing title", "Give the event a title.");
+    if (!canEdit(editingItem)) {
+      return Alert.alert("View only", "Only the creator can edit this plan.");
     }
 
-    const start = makeDateTime(selectedDate, eventAllDay ? "" : eventStartTime, true);
+    const cleanTitle = editTitle.trim();
 
-    if (start.error) {
-      return Alert.alert("Invalid date or time", start.error);
+    if (!cleanTitle) {
+      return Alert.alert("Missing title", "The title cannot be blank.");
     }
 
-    let endDate = new Date(start.date.getTime() + 60 * 60 * 1000);
-    let normalizedEndTime = null;
+    setSaving(true);
 
-    if (!eventAllDay && eventEndTime.trim()) {
-      const end = makeDateTime(selectedDate, eventEndTime, true);
+    try {
+      if (editingType === "task") {
+        const due = makeDateTime(editDate, editStartTime, true);
 
-      if (end.error) {
-        return Alert.alert("Invalid end time", end.error);
+        if (due.error) {
+          setSaving(false);
+          return Alert.alert("Invalid date or time", due.error);
+        }
+
+        const { error } = await supabase
+          .from("planner_tasks")
+          .update({
+            title: cleanTitle,
+            due_at: due.date.toISOString(),
+            due_time: due.time,
+            completed: editCompleted,
+            color: editColor,
+          })
+          .eq("id", editingItem.id)
+          .eq("creator_id", user.id);
+
+        if (error) throw error;
+
+        if (editingItem.group_id) {
+          await notifyGroupMembers(
+            editingItem.group_id,
+            "Task updated",
+            `${cleanTitle} was updated.`
+          );
+        }
+
+        setNotice("Task updated.");
+      } else {
+        const start = makeDateTime(editDate, editAllDay ? "" : editStartTime, true);
+
+        if (start.error) {
+          setSaving(false);
+          return Alert.alert("Invalid date or time", start.error);
+        }
+
+        let endDate;
+        let normalizedEndTime = null;
+
+        if (editAllDay) {
+          endDate = new Date(start.date);
+          endDate.setHours(23, 59, 0, 0);
+        } else if (editEndTime.trim()) {
+          const end = makeDateTime(editDate, editEndTime, true);
+
+          if (end.error) {
+            setSaving(false);
+            return Alert.alert("Invalid end time", end.error);
+          }
+
+          endDate = end.date;
+          normalizedEndTime = end.time;
+
+          if (endDate <= start.date) {
+            setSaving(false);
+            return Alert.alert("Invalid time", "End time must be after start time.");
+          }
+        } else {
+          endDate = new Date(start.date.getTime() + 60 * 60 * 1000);
+        }
+
+        const { error } = await supabase
+          .from("planner_events")
+          .update({
+            title: cleanTitle,
+            description: editDescription.trim() || null,
+            starts_at: start.date.toISOString(),
+            ends_at: endDate.toISOString(),
+            start_time: editAllDay ? null : start.time,
+            end_time: editAllDay ? null : normalizedEndTime,
+            is_all_day: editAllDay,
+            completed: editCompleted,
+            color: editColor,
+          })
+          .eq("id", editingItem.id)
+          .eq("creator_id", user.id);
+
+        if (error) throw error;
+
+        if (editingItem.group_id) {
+          await notifyGroupMembers(
+            editingItem.group_id,
+            "Event updated",
+            `${cleanTitle} was updated.`
+          );
+        }
+
+        setNotice("Event updated.");
       }
 
-      endDate = end.date;
-      normalizedEndTime = end.time;
+      closeEdit();
+      await loadAll();
+    } catch (err) {
+      Alert.alert("Could not save changes", err.message);
+    } finally {
+      setSaving(false);
     }
-
-    const { data: createdEvent, error } = await supabase
-      .from("planner_events")
-      .insert({
-        creator_id: user.id,
-        group_id: eventGroupId || null,
-        title,
-        starts_at: start.date.toISOString(),
-        ends_at: endDate.toISOString(),
-        start_time: eventAllDay ? null : start.time,
-        end_time: eventAllDay ? null : normalizedEndTime,
-        is_all_day: eventAllDay,
-        completed: false,
-      })
-      .select("*")
-      .single();
-
-    if (error) {
-      return Alert.alert("Could not create event", error.message);
-    }
-
-    await supabase.from("notifications").insert({
-      user_id: user.id,
-      type: "event_created",
-      title: "Event created",
-      body: `${title} was added to your planner.`,
-      read: false,
-      link: "/planner",
-    });
-
-    if (eventGroupId) {
-      const groupName = groupNameById(groups, eventGroupId);
-
-      await notifyGroupMembers(
-        eventGroupId,
-        "New group event",
-        `${title} was added to ${groupName}.`,
-        `/group/${eventGroupId}`
-      );
-
-      await supabase.from("messages").insert({
-        group_id: eventGroupId,
-        sender_id: user.id,
-        content: `📅 Event created: ${title} — ${prettyDate(selectedDate)}${
-          eventAllDay ? " all day" : start.time ? ` at ${start.time}` : ""
-        }`,
-      });
-    }
-
-    setNotice(`Event created: ${title}`);
-    setEventTitle("");
-    setEventGroupId("");
-    setEventStartTime("");
-    setEventEndTime("");
-    setEventAllDay(false);
-
-    await loadPlanner();
   }
 
-  async function createTask() {
-    const title = taskTitle.trim();
-
-    if (!title) {
-      return Alert.alert("Missing task", "Write the task first.");
+  async function toggleTaskComplete(task) {
+    if (!canEdit(task)) {
+      return Alert.alert("View only", "Only the creator can update this task.");
     }
 
-    const due = makeDateTime(selectedDate, taskDueTime, true);
-
-    if (due.error) {
-      return Alert.alert("Invalid date or time", due.error);
-    }
-
-    const { data: createdTask, error } = await supabase
-      .from("planner_tasks")
-      .insert({
-        creator_id: user.id,
-        group_id: taskGroupId || null,
-        title,
-        due_at: due.date.toISOString(),
-        due_time: due.time,
-        completed: false,
-      })
-      .select("*")
-      .single();
-
-    if (error) {
-      return Alert.alert("Could not create task", error.message);
-    }
-
-    await supabase.from("notifications").insert({
-      user_id: user.id,
-      type: "task_created",
-      title: "Task created",
-      body: `${title} was added to your planner.`,
-      read: false,
-      link: "/planner",
-    });
-
-    if (taskGroupId) {
-      const groupName = groupNameById(groups, taskGroupId);
-
-      await notifyGroupMembers(
-        taskGroupId,
-        "New group task",
-        `${title} was added to ${groupName}.`,
-        `/group/${taskGroupId}`
-      );
-
-      await supabase.from("messages").insert({
-        group_id: taskGroupId,
-        sender_id: user.id,
-        content: `✅ Task created: ${title} — due ${prettyDate(selectedDate)}${
-          due.time ? ` at ${due.time}` : ""
-        }`,
-      });
-    }
-
-    setNotice(`Task created: ${title}`);
-    setTaskTitle("");
-    setTaskGroupId("");
-    setTaskDueTime("");
-
-    await loadPlanner();
-  }
-
-  async function toggleTask(task) {
     const { error } = await supabase
       .from("planner_tasks")
       .update({ completed: !task.completed })
-      .eq("id", task.id);
+      .eq("id", task.id)
+      .eq("creator_id", user.id);
 
     if (error) {
-      return Alert.alert("Could not update task", error.message);
+      Alert.alert("Could not update task", error.message);
+      return;
     }
 
-    await loadPlanner();
+    await loadAll();
   }
 
-  async function deleteEvent(event) {
-    const { error } = await supabase
-      .from("planner_events")
-      .delete()
-      .eq("id", event.id);
+  async function deletePlan() {
+    if (!editingItem || !editingType) return;
 
-    if (error) return Alert.alert("Could not delete event", error.message);
+    if (!canEdit(editingItem)) {
+      return Alert.alert("View only", "Only the creator can delete this plan.");
+    }
 
-    await loadPlanner();
+    const doDelete = async () => {
+      setSaving(true);
+
+      try {
+        const table = editingType === "task" ? "planner_tasks" : "planner_events";
+
+        const { error } = await supabase
+          .from(table)
+          .delete()
+          .eq("id", editingItem.id)
+          .eq("creator_id", user.id);
+
+        if (error) throw error;
+
+        setNotice(editingType === "task" ? "Task deleted." : "Event deleted.");
+        closeEdit();
+        await loadAll();
+      } catch (err) {
+        Alert.alert("Could not delete", err.message);
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    if (Platform.OS === "web") {
+      const confirmed = window.confirm("Delete this plan?");
+      if (confirmed) await doDelete();
+      return;
+    }
+
+    Alert.alert("Delete plan?", "This cannot be undone.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: doDelete },
+    ]);
   }
 
-  async function deleteTask(task) {
-    const { error } = await supabase
-      .from("planner_tasks")
-      .delete()
-      .eq("id", task.id);
-
-    if (error) return Alert.alert("Could not delete task", error.message);
-
-    await loadPlanner();
-  }
-
-  const eventsForSelectedDay = events.filter(
-    (event) => toDateKey(new Date(event.starts_at)) === selectedKey
-  );
-
-  const tasksForSelectedDay = tasks.filter(
-    (task) => task.due_at && toDateKey(new Date(task.due_at)) === selectedKey
-  );
-
-  function eventsOnDate(date) {
-    const key = toDateKey(date);
-    return events.filter((event) => toDateKey(new Date(event.starts_at)) === key);
-  }
-
-  function tasksOnDate(date) {
-    const key = toDateKey(date);
-    return tasks.filter(
-      (task) => task.due_at && toDateKey(new Date(task.due_at)) === key
+  function renderColorPicker() {
+    return (
+      <View style={styles.colorRow}>
+        {planColors.map((color) => (
+          <Pressable
+            key={color}
+            onPress={() => setEditColor(color)}
+            style={[
+              styles.colorDot,
+              { backgroundColor: color },
+              editColor === color && styles.selectedColorDot,
+            ]}
+          />
+        ))}
+      </View>
     );
   }
 
-  const completeTasks = tasksForSelectedDay.filter((task) => task.completed).length;
-  const selectedTotal = tasksForSelectedDay.length + eventsForSelectedDay.length;
+  function renderScopePill(item) {
+    const group = item.group_id ? groupMap[item.group_id] : null;
 
-  return (
-    <ScrollView style={styles.page} contentContainerStyle={styles.content}>
-      <View style={styles.hero}>
-        <Text style={styles.title}>Planner</Text>
-        <Text style={styles.subtitle}>
-          Pick a day, add an event or task, and optionally share it with a group.
-        </Text>
-      </View>
-
-      {!!notice && (
-        <View style={styles.notice}>
-          <Text style={styles.noticeText}>✅ {notice}</Text>
-        </View>
-      )}
-
-      <View style={styles.calendarCard}>
-        <View style={styles.calendarHeader}>
-          <Pressable onPress={previousMonth} style={styles.monthButton}>
-            <Text style={styles.monthButtonText}>‹</Text>
-          </Pressable>
-
-          <View>
-            <Text style={styles.monthTitle}>
-              {MONTHS[visibleMonth]} {visibleYear}
-            </Text>
-            <Text style={styles.monthSubtitle}>{prettyDate(selectedDate)}</Text>
-          </View>
-
-          <Pressable onPress={nextMonth} style={styles.monthButton}>
-            <Text style={styles.monthButtonText}>›</Text>
-          </Pressable>
-        </View>
-
-        <View style={styles.weekRow}>
-          {DAYS.map((day) => (
-            <Text key={day} style={styles.weekText}>
-              {day}
-            </Text>
-          ))}
-        </View>
-
-        <View style={styles.grid}>
-          {calendarCells.map((cell, index) => {
-            const key = toDateKey(cell.date);
-            const selected = key === selectedKey;
-            const isToday = key === toDateKey(new Date());
-            const dayEvents = eventsOnDate(cell.date);
-            const dayTasks = tasksOnDate(cell.date);
-
-            return (
-              <Pressable
-                key={`${key}-${index}`}
-                onPress={() => setSelectedDate(cell.date)}
-                style={[
-                  styles.dayCell,
-                  !cell.currentMonth && styles.otherMonthCell,
-                  selected && styles.selectedDayCell,
-                  isToday && styles.todayCell,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.dayNumber,
-                    !cell.currentMonth && styles.otherMonthText,
-                    selected && styles.selectedDayText,
-                  ]}
-                >
-                  {cell.day}
-                </Text>
-
-                <View style={styles.dayDots}>
-                  {dayEvents.slice(0, 2).map((event) => (
-                    <View key={event.id} style={styles.eventDot} />
-                  ))}
-
-                  {dayTasks.slice(0, 2).map((task) => (
-                    <View key={task.id} style={styles.taskDot} />
-                  ))}
-                </View>
-
-                {dayEvents[0] && (
-                  <Text numberOfLines={1} style={styles.dayPreview}>
-                    {dayEvents[0].title}
-                  </Text>
-                )}
-              </Pressable>
-            );
-          })}
-        </View>
-      </View>
-
-      <View style={styles.card}>
-        <View style={styles.sectionHeader}>
-          <View>
-            <Text style={styles.sectionTitle}>{prettyDate(selectedDate)}</Text>
-            <Text style={styles.muted}>
-              {selectedTotal === 0
-                ? "Nothing planned yet."
-                : `${eventsForSelectedDay.length} events • ${completeTasks}/${tasksForSelectedDay.length} tasks done`}
-            </Text>
-          </View>
-        </View>
-
-        {eventsForSelectedDay.map((event) => (
-          <View key={event.id} style={styles.item}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.itemTitle}>📅 {event.title}</Text>
-
-              <Text style={styles.itemSub}>
-                {event.is_all_day
-                  ? "All day"
-                  : `${event.start_time || "No time"}${
-                      event.end_time ? ` - ${event.end_time}` : ""
-                    }`}
-              </Text>
-
-              {event.groups && (
-                <View style={styles.groupTag}>
-                  <GroupAvatar
-                    name={event.groups.name}
-                    color={event.groups.avatar_color}
-                    emoji={event.groups.avatar_emoji}
-                    avatarUrl={event.groups.avatar_url}
-                    size={24}
-                  />
-                  <Text style={styles.groupTagText}>{event.groups.name}</Text>
-                </View>
-              )}
-            </View>
-
-            <Pressable onPress={() => deleteEvent(event)} style={styles.deleteButton}>
-              <Text style={styles.deleteText}>Delete</Text>
-            </Pressable>
-          </View>
-        ))}
-
-        {tasksForSelectedDay.map((task) => (
-          <Pressable key={task.id} onPress={() => toggleTask(task)} style={styles.item}>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.itemTitle, task.completed && styles.completedText]}>
-                {task.completed ? "✓ " : "○ "}
-                {task.title}
-              </Text>
-
-              <Text style={styles.itemSub}>Due {task.due_time || "anytime"}</Text>
-
-              {task.groups && (
-                <View style={styles.groupTag}>
-                  <GroupAvatar
-                    name={task.groups.name}
-                    color={task.groups.avatar_color}
-                    emoji={task.groups.avatar_emoji}
-                    avatarUrl={task.groups.avatar_url}
-                    size={24}
-                  />
-                  <Text style={styles.groupTagText}>{task.groups.name}</Text>
-                </View>
-              )}
-            </View>
-
-            <Pressable onPress={() => deleteTask(task)} style={styles.deleteButton}>
-              <Text style={styles.deleteText}>Delete</Text>
-            </Pressable>
-          </Pressable>
-        ))}
-      </View>
-
-      <View style={styles.card}>
-        <View style={styles.modeSwitch}>
-          <Pressable
-            onPress={() => setMode("event")}
-            style={[styles.modeButton, mode === "event" && styles.modeButtonActive]}
-          >
-            <Text style={[styles.modeText, mode === "event" && styles.modeTextActive]}>
-              Event
-            </Text>
-          </Pressable>
-
-          <Pressable
-            onPress={() => setMode("task")}
-            style={[styles.modeButton, mode === "task" && styles.modeButtonActive]}
-          >
-            <Text style={[styles.modeText, mode === "task" && styles.modeTextActive]}>
-              Task
-            </Text>
-          </Pressable>
-        </View>
-
-        {mode === "event" ? (
-          <>
-            <Text style={styles.sectionTitle}>Create event</Text>
-
-            <AppInput
-              placeholder="Event title"
-              value={eventTitle}
-              onChangeText={setEventTitle}
-            />
-
-            <Pressable
-              onPress={() => setEventAllDay((value) => !value)}
-              style={[styles.toggle, eventAllDay && styles.toggleActive]}
-            >
-              <Text style={styles.toggleText}>
-                {eventAllDay ? "✓ All-day event" : "Timed event"}
-              </Text>
-            </Pressable>
-
-            {!eventAllDay && (
-              <>
-                <Text style={styles.label}>Start time</Text>
-
-                <View style={styles.quickTimeRow}>
-                  {quickTimes.map((time) => (
-                    <Pressable
-                      key={time}
-                      onPress={() => setEventStartTime(time)}
-                      style={[
-                        styles.timeChip,
-                        eventStartTime === time && styles.timeChipActive,
-                      ]}
-                    >
-                      <Text style={styles.timeChipText}>{time}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-
-                <AppInput
-                  placeholder="Custom start time, ex: 18:30"
-                  value={eventStartTime}
-                  onChangeText={setEventStartTime}
-                />
-
-                <AppInput
-                  placeholder="End time optional, ex: 20:00"
-                  value={eventEndTime}
-                  onChangeText={setEventEndTime}
-                />
-              </>
-            )}
-
-            <Text style={styles.label}>Share with group optional</Text>
-
-            <GroupPicker
-              groups={groups}
-              selectedGroupId={eventGroupId}
-              setSelectedGroupId={setEventGroupId}
-            />
-
-            <AppButton title="Create Event" onPress={createEvent} />
-          </>
-        ) : (
-          <>
-            <Text style={styles.sectionTitle}>Add task</Text>
-
-            <AppInput
-              placeholder="Task title"
-              value={taskTitle}
-              onChangeText={setTaskTitle}
-            />
-
-            <Text style={styles.label}>Due time optional</Text>
-
-            <View style={styles.quickTimeRow}>
-              {quickTimes.map((time) => (
-                <Pressable
-                  key={time}
-                  onPress={() => setTaskDueTime(time)}
-                  style={[
-                    styles.timeChip,
-                    taskDueTime === time && styles.timeChipActive,
-                  ]}
-                >
-                  <Text style={styles.timeChipText}>{time}</Text>
-                </Pressable>
-              ))}
-            </View>
-
-            <AppInput
-              placeholder="Custom due time, ex: 16:00"
-              value={taskDueTime}
-              onChangeText={setTaskDueTime}
-            />
-
-            <Text style={styles.label}>Share with group optional</Text>
-
-            <GroupPicker
-              groups={groups}
-              selectedGroupId={taskGroupId}
-              setSelectedGroupId={setTaskGroupId}
-            />
-
-            <AppButton title="Add Task" onPress={createTask} />
-          </>
-        )}
-      </View>
-    </ScrollView>
-  );
-}
-
-function GroupPicker({ groups, selectedGroupId, setSelectedGroupId }) {
-  return (
-    <View style={styles.groupPicker}>
-      <Pressable
-        onPress={() => setSelectedGroupId("")}
-        style={[
-          styles.groupChoice,
-          selectedGroupId === "" && styles.groupChoiceActive,
-        ]}
-      >
-        <Text style={styles.groupChoiceText}>Personal</Text>
-      </Pressable>
-
-      {groups.map((group) => (
-        <Pressable
-          key={group.id}
-          onPress={() => setSelectedGroupId(group.id)}
-          style={[
-            styles.groupChoice,
-            selectedGroupId === group.id && styles.groupChoiceActive,
-          ]}
-        >
+    return (
+      <View style={styles.scopePill}>
+        {group ? (
           <GroupAvatar
             name={group.name}
             color={group.avatar_color}
             emoji={group.avatar_emoji}
             avatarUrl={group.avatar_url}
-            size={26}
+            size={22}
           />
-          <Text style={styles.groupChoiceText}>{group.name}</Text>
+        ) : (
+          <View style={styles.personalDot}>
+            <Text style={styles.personalDotText}>Me</Text>
+          </View>
+        )}
+
+        <Text style={styles.scopePillText}>{getScopeLabel(item)}</Text>
+      </View>
+    );
+  }
+
+  function renderEventCard(event) {
+    const editable = canEdit(event);
+
+    return (
+      <Pressable
+        key={`event-${event.id}`}
+        onPress={() => openEdit("event", event)}
+        style={styles.planCard}
+      >
+        <View style={[styles.colorBar, { backgroundColor: event.color || colors.violet }]} />
+
+        <View style={{ flex: 1 }}>
+          <View style={styles.planTopRow}>
+            <Text style={styles.planTitle}>📅 {event.title}</Text>
+            <Text style={editable ? styles.editableText : styles.viewOnlyText}>
+              {editable ? "Edit" : "View"}
+            </Text>
+          </View>
+
+          <Text style={styles.planMeta}>
+            {formatDate(event.starts_at)} • {formatEventTime(event)}
+          </Text>
+
+          {!!event.description && (
+            <Text numberOfLines={2} style={styles.planDescription}>
+              {event.description}
+            </Text>
+          )}
+
+          <View style={styles.pillRow}>
+            {renderScopePill(event)}
+            <Text style={styles.smallPill}>By {getCreatorName(event)}</Text>
+          </View>
+        </View>
+      </Pressable>
+    );
+  }
+
+  function renderTaskCard(task) {
+    const editable = canEdit(task);
+
+    return (
+      <Pressable
+        key={`task-${task.id}`}
+        onPress={() => openEdit("task", task)}
+        style={styles.planCard}
+      >
+        <View style={[styles.colorBar, { backgroundColor: task.color || colors.green }]} />
+
+        <Pressable
+          onPress={() => toggleTaskComplete(task)}
+          style={[
+            styles.checkBox,
+            task.completed && styles.checkBoxDone,
+            !editable && styles.checkBoxDisabled,
+          ]}
+        >
+          <Text style={styles.checkText}>{task.completed ? "✓" : ""}</Text>
         </Pressable>
-      ))}
+
+        <View style={{ flex: 1 }}>
+          <View style={styles.planTopRow}>
+            <Text style={[styles.planTitle, task.completed && styles.completedTitle]}>
+              ✅ {task.title}
+            </Text>
+
+            <Text style={editable ? styles.editableText : styles.viewOnlyText}>
+              {editable ? "Edit" : "View"}
+            </Text>
+          </View>
+
+          <Text style={styles.planMeta}>
+            {formatDate(task.due_at)} • {formatTaskTime(task)}
+          </Text>
+
+          <View style={styles.pillRow}>
+            {renderScopePill(task)}
+            <Text style={styles.smallPill}>By {getCreatorName(task)}</Text>
+            {task.completed && <Text style={styles.donePill}>Done</Text>}
+          </View>
+        </View>
+      </Pressable>
+    );
+  }
+
+  function renderCalendarDay(day) {
+    const dayEvents = visibleEvents.filter(
+      (event) => toDateKey(new Date(event.starts_at)) === day.key
+    );
+
+    const dayTasks = visibleTasks.filter(
+      (task) => toDateKey(new Date(task.due_at)) === day.key
+    );
+
+    const hasItems = dayEvents.length + dayTasks.length > 0;
+    const selected = selectedDateKey === day.key;
+
+    return (
+      <Pressable
+        key={day.key}
+        onPress={() => setSelectedDateKey(day.key)}
+        style={[
+          styles.dayCell,
+          !day.inMonth && styles.dayCellMuted,
+          day.isToday && styles.dayCellToday,
+          selected && styles.dayCellSelected,
+        ]}
+      >
+        <Text
+          style={[
+            styles.dayNumber,
+            !day.inMonth && styles.dayNumberMuted,
+            selected && styles.dayNumberSelected,
+          ]}
+        >
+          {day.dayNumber}
+        </Text>
+
+        {hasItems && (
+          <View style={styles.dayDots}>
+            {dayEvents.slice(0, 2).map((event) => (
+              <View
+                key={`event-dot-${event.id}`}
+                style={[styles.dayDot, { backgroundColor: event.color || colors.violet }]}
+              />
+            ))}
+
+            {dayTasks.slice(0, 2).map((task) => (
+              <View
+                key={`task-dot-${task.id}`}
+                style={[styles.dayDot, { backgroundColor: task.color || colors.green }]}
+              />
+            ))}
+          </View>
+        )}
+      </Pressable>
+    );
+  }
+
+  return (
+    <View style={styles.shell}>
+      <ScrollView
+        style={styles.page}
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
+      >
+        <View style={styles.header}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.kicker}>Plans</Text>
+            <Text style={styles.title}>Your schedule</Text>
+            <Text style={styles.subtitle}>View and edit tasks/events.</Text>
+          </View>
+
+          <Pressable onPress={() => router.push("/settings")}>
+            <ProfileAvatar profile={profile} size={52} showOnline online ring />
+          </Pressable>
+        </View>
+
+        {!!notice && (
+          <Pressable onPress={() => setNotice("")} style={styles.notice}>
+            <Text style={styles.noticeText}>✅ {notice}</Text>
+          </Pressable>
+        )}
+
+        <View style={styles.heroCard}>
+          <View style={styles.heroGlow} />
+
+          <View>
+            <Text style={styles.heroKicker}>Overview</Text>
+            <Text style={styles.heroTitle}>
+              {upcomingEvents.length + openTasks.length}
+            </Text>
+            <Text style={styles.heroText}>active plans ahead</Text>
+          </View>
+
+          <View style={styles.heroStats}>
+            <View style={styles.heroStat}>
+              <Text style={styles.heroStatNumber}>{upcomingEvents.length}</Text>
+              <Text style={styles.heroStatLabel}>events</Text>
+            </View>
+
+            <View style={styles.heroStat}>
+              <Text style={styles.heroStatNumber}>{openTasks.length}</Text>
+              <Text style={styles.heroStatLabel}>tasks</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.controlCard}>
+          <View style={styles.segmentRow}>
+            <Pressable
+              onPress={() => setActiveView("calendar")}
+              style={[
+                styles.segmentButton,
+                activeView === "calendar" && styles.segmentActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.segmentText,
+                  activeView === "calendar" && styles.segmentTextActive,
+                ]}
+              >
+                Calendar
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => setActiveView("list")}
+              style={[
+                styles.segmentButton,
+                activeView === "list" && styles.segmentActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.segmentText,
+                  activeView === "list" && styles.segmentTextActive,
+                ]}
+              >
+                List
+              </Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.filterRow}>
+            {["all", "personal", "group"].map((filter) => (
+              <Pressable
+                key={filter}
+                onPress={() => setScopeFilter(filter)}
+                style={[
+                  styles.filterButton,
+                  scopeFilter === filter && styles.filterActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.filterText,
+                    scopeFilter === filter && styles.filterTextActive,
+                  ]}
+                >
+                  {filter}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+
+        {activeView === "calendar" ? (
+          <>
+            <View style={styles.calendarCard}>
+              <View style={styles.monthHeader}>
+                <Pressable onPress={previousMonth} style={styles.monthButton}>
+                  <Text style={styles.monthButtonText}>‹</Text>
+                </Pressable>
+
+                <Text style={styles.monthTitle}>{monthLabel}</Text>
+
+                <Pressable onPress={nextMonth} style={styles.monthButton}>
+                  <Text style={styles.monthButtonText}>›</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.weekRow}>
+                {["S", "M", "T", "W", "T", "F", "S"].map((day, index) => (
+                  <Text key={`${day}-${index}`} style={styles.weekDay}>
+                    {day}
+                  </Text>
+                ))}
+              </View>
+
+              <View style={styles.calendarGrid}>{monthDays.map(renderCalendarDay)}</View>
+            </View>
+
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>SELECTED DAY</Text>
+              <Text style={styles.sectionLink}>{selectedDateKey}</Text>
+            </View>
+
+            {selectedDayEvents.length === 0 && selectedDayTasks.length === 0 ? (
+              <View style={styles.emptyCard}>
+                <Text style={styles.emptyTitle}>Nothing on this day</Text>
+                <Text style={styles.emptyText}>
+                  Use the + button to create a task or event.
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.listStack}>
+                {selectedDayEvents.map(renderEventCard)}
+                {selectedDayTasks.map(renderTaskCard)}
+              </View>
+            )}
+          </>
+        ) : (
+          <>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>UPCOMING EVENTS</Text>
+              <Text style={styles.sectionLink}>{upcomingEvents.length}</Text>
+            </View>
+
+            {upcomingEvents.length === 0 ? (
+              <View style={styles.emptyCard}>
+                <Text style={styles.emptyTitle}>No upcoming events</Text>
+                <Text style={styles.emptyText}>Create one with the + button.</Text>
+              </View>
+            ) : (
+              <View style={styles.listStack}>{upcomingEvents.map(renderEventCard)}</View>
+            )}
+
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>OPEN TASKS</Text>
+              <Text style={styles.sectionLink}>{openTasks.length}</Text>
+            </View>
+
+            {openTasks.length === 0 ? (
+              <View style={styles.emptyCard}>
+                <Text style={styles.emptyTitle}>No open tasks</Text>
+                <Text style={styles.emptyText}>Create one with the + button.</Text>
+              </View>
+            ) : (
+              <View style={styles.listStack}>{openTasks.map(renderTaskCard)}</View>
+            )}
+
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>COMPLETED</Text>
+              <Text style={styles.sectionLink}>{completedTasks.length}</Text>
+            </View>
+
+            {completedTasks.length > 0 && (
+              <View style={styles.listStack}>
+                {completedTasks.slice(0, 12).map(renderTaskCard)}
+              </View>
+            )}
+          </>
+        )}
+      </ScrollView>
+
+      <BottomNav active="plans" />
+
+      <Modal visible={!!editingItem} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.editSheet}>
+            <View style={styles.editHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.editKicker}>
+                  {editingType === "task" ? "Task" : "Event"}
+                </Text>
+                <Text style={styles.editTitle}>
+                  {canEdit(editingItem || {}) ? "Edit plan" : "View plan"}
+                </Text>
+              </View>
+
+              <Pressable onPress={closeEdit} style={styles.closeButton}>
+                <Text style={styles.closeText}>×</Text>
+              </Pressable>
+            </View>
+
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.editContent}
+            >
+              <AppInput
+                label="Title"
+                placeholder="Title"
+                value={editTitle}
+                onChangeText={setEditTitle}
+                editable={canEdit(editingItem || {})}
+              />
+
+              {editingType === "event" && (
+                <AppInput
+                  label="Description"
+                  placeholder="Optional details"
+                  value={editDescription}
+                  onChangeText={setEditDescription}
+                  multiline
+                  editable={canEdit(editingItem || {})}
+                />
+              )}
+
+              <AppInput
+                label="Date"
+                placeholder="2026-05-16"
+                value={editDate}
+                onChangeText={setEditDate}
+                editable={canEdit(editingItem || {})}
+              />
+
+              {editingType === "event" ? (
+                <>
+                  <Pressable
+                    onPress={() =>
+                      canEdit(editingItem || {}) &&
+                      setEditAllDay((value) => !value)
+                    }
+                    style={[styles.toggle, editAllDay && styles.toggleActive]}
+                  >
+                    <Text style={styles.toggleText}>
+                      {editAllDay ? "✓ All-day event" : "Timed event"}
+                    </Text>
+                  </Pressable>
+
+                  {!editAllDay && (
+                    <>
+                      <AppInput
+                        label="Start time"
+                        placeholder="6pm"
+                        value={editStartTime}
+                        onChangeText={setEditStartTime}
+                        editable={canEdit(editingItem || {})}
+                      />
+
+                      <AppInput
+                        label="End time"
+                        placeholder="8pm"
+                        value={editEndTime}
+                        onChangeText={setEditEndTime}
+                        editable={canEdit(editingItem || {})}
+                      />
+                    </>
+                  )}
+                </>
+              ) : (
+                <AppInput
+                  label="Due time"
+                  placeholder="Optional, ex: 6pm"
+                  value={editStartTime}
+                  onChangeText={setEditStartTime}
+                  editable={canEdit(editingItem || {})}
+                />
+              )}
+
+              <Pressable
+                onPress={() =>
+                  canEdit(editingItem || {}) &&
+                  setEditCompleted((value) => !value)
+                }
+                style={[styles.toggle, editCompleted && styles.toggleActive]}
+              >
+                <Text style={styles.toggleText}>
+                  {editCompleted ? "✓ Marked complete" : "Not complete"}
+                </Text>
+              </Pressable>
+
+              <Text style={styles.fieldLabel}>Color</Text>
+
+              {canEdit(editingItem || {}) ? (
+                renderColorPicker()
+              ) : (
+                <View
+                  style={[
+                    styles.readOnlyColor,
+                    { backgroundColor: editColor || colors.violet },
+                  ]}
+                />
+              )}
+
+              {editingItem && (
+                <View style={styles.editInfoBox}>
+                  <Text style={styles.editInfoText}>
+                    Scope: {getScopeLabel(editingItem)}
+                  </Text>
+                  <Text style={styles.editInfoText}>
+                    Creator: {getCreatorName(editingItem)}
+                  </Text>
+                </View>
+              )}
+
+              {canEdit(editingItem || {}) ? (
+                <>
+                  <AppButton
+                    title={saving ? "Saving..." : "Save Changes"}
+                    onPress={saveEdit}
+                    disabled={saving}
+                  />
+
+                  <Pressable
+                    onPress={deletePlan}
+                    disabled={saving}
+                    style={styles.deleteButton}
+                  >
+                    <Text style={styles.deleteButtonText}>Delete Plan</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <View style={styles.viewOnlyBox}>
+                  <Text style={styles.viewOnlyBoxText}>
+                    You can view this plan, but only the creator can edit it.
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1, backgroundColor: colors.bg },
-  content: { padding: 20, gap: 18, paddingBottom: 80 },
-  hero: { paddingTop: 8 },
-  title: { color: colors.text, fontSize: 38, fontWeight: "900" },
-  subtitle: { color: colors.muted, marginTop: 5, lineHeight: 20 },
+  shell: {
+    flex: 1,
+    backgroundColor: colors.bg,
+  },
+  page: {
+    flex: 1,
+    backgroundColor: colors.bg,
+  },
+  content: {
+    padding: 18,
+    gap: 16,
+    paddingBottom: 112,
+  },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  kicker: {
+    color: colors.gold,
+    fontWeight: "900",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    fontSize: 12,
+  },
+  title: {
+    color: colors.text,
+    fontSize: 34,
+    fontWeight: "900",
+    letterSpacing: -1,
+  },
+  subtitle: {
+    color: colors.muted,
+    fontWeight: "800",
+    marginTop: 2,
+  },
   notice: {
-    backgroundColor: "rgba(45,212,191,0.16)",
-    borderColor: colors.green,
+    backgroundColor: colors.greenSoft,
+    borderColor: "rgba(45,212,191,0.45)",
     borderWidth: 1,
     borderRadius: 18,
-    padding: 14,
+    padding: 13,
   },
-  noticeText: { color: colors.text, fontWeight: "900" },
-  calendarCard: {
-    backgroundColor: colors.card,
-    borderRadius: radii.xl,
+  noticeText: {
+    color: colors.text,
+    fontWeight: "900",
+  },
+  heroCard: {
+    backgroundColor: colors.bg2,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: 16,
-    gap: 14,
-    ...shadow,
-  },
-  calendarHeader: {
+    borderRadius: 30,
+    padding: 20,
+    overflow: "hidden",
     flexDirection: "row",
     justifyContent: "space-between",
+    gap: 16,
+    ...shadow,
+  },
+  heroGlow: {
+    position: "absolute",
+    top: -120,
+    right: -90,
+    width: 260,
+    height: 260,
+    borderRadius: 999,
+    backgroundColor: "rgba(124,92,255,0.12)",
+  },
+  heroKicker: {
+    color: colors.gold,
+    fontWeight: "900",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    fontSize: 12,
+  },
+  heroTitle: {
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 58,
+    letterSpacing: -2,
+  },
+  heroText: {
+    color: colors.text2,
+    fontWeight: "800",
+  },
+  heroStats: {
+    gap: 10,
+    justifyContent: "center",
+  },
+  heroStat: {
+    minWidth: 82,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 18,
+    padding: 10,
     alignItems: "center",
   },
-  monthButton: {
-    height: 42,
-    width: 42,
-    borderRadius: 16,
+  heroStatNumber: {
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 24,
+  },
+  heroStatLabel: {
+    color: colors.muted,
+    fontWeight: "900",
+    fontSize: 11,
+    marginTop: 2,
+  },
+  controlCard: {
     backgroundColor: colors.bg2,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 28,
+    padding: 14,
+    gap: 12,
+    ...softShadow,
+  },
+  segmentRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  segmentButton: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 16,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  segmentActive: {
+    backgroundColor: colors.violet,
+    borderColor: colors.violet,
+  },
+  segmentText: {
+    color: colors.muted,
+    fontWeight: "900",
+  },
+  segmentTextActive: {
+    color: colors.text,
+  },
+  filterRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  filterButton: {
+    flex: 1,
+    borderRadius: 999,
+    paddingVertical: 10,
+    alignItems: "center",
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  filterActive: {
+    backgroundColor: colors.violetSoft,
+    borderColor: colors.violet,
+  },
+  filterText: {
+    color: colors.muted,
+    fontWeight: "900",
+    textTransform: "capitalize",
+  },
+  filterTextActive: {
+    color: colors.text,
+  },
+  calendarCard: {
+    backgroundColor: colors.bg2,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 30,
+    padding: 16,
+    gap: 14,
+    ...softShadow,
+  },
+  monthHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  monthButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 999,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
     alignItems: "center",
     justifyContent: "center",
   },
   monthButtonText: {
     color: colors.text,
     fontSize: 30,
-    fontWeight: "900",
-    lineHeight: 32,
+    fontWeight: "700",
+    marginTop: -4,
   },
   monthTitle: {
     color: colors.text,
     fontSize: 22,
     fontWeight: "900",
-    textAlign: "center",
+    letterSpacing: -0.3,
   },
-  monthSubtitle: {
-    color: colors.soft,
-    fontWeight: "800",
-    textAlign: "center",
-    marginTop: 3,
+  weekRow: {
+    flexDirection: "row",
   },
-  weekRow: { flexDirection: "row" },
-  weekText: {
+  weekDay: {
     flex: 1,
-    color: colors.muted,
     textAlign: "center",
+    color: colors.gold,
     fontWeight: "900",
     fontSize: 12,
   },
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
+  calendarGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
   dayCell: {
-    width: "13.35%",
-    minHeight: 84,
-    backgroundColor: colors.bg2,
-    borderRadius: 18,
-    padding: 8,
-    borderWidth: 1,
-    borderColor: "transparent",
-  },
-  otherMonthCell: { opacity: 0.45 },
-  selectedDayCell: {
-    borderColor: colors.soft,
-    backgroundColor: "rgba(124,92,255,0.34)",
-  },
-  todayCell: { borderColor: colors.violet },
-  dayNumber: { color: colors.text, fontWeight: "900" },
-  otherMonthText: { color: colors.muted },
-  selectedDayText: { color: colors.soft },
-  dayDots: { flexDirection: "row", gap: 4, marginTop: 8 },
-  eventDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 999,
-    backgroundColor: colors.violet,
-  },
-  taskDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 999,
-    backgroundColor: colors.green,
-  },
-  dayPreview: {
-    color: colors.muted,
-    fontSize: 10,
-    marginTop: 7,
-  },
-  card: {
+    width: "13.45%",
+    minHeight: 54,
+    borderRadius: 16,
     backgroundColor: colors.card,
-    borderRadius: radii.xl,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: 18,
-    gap: 14,
-    ...shadow,
+    padding: 6,
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  dayCellMuted: {
+    opacity: 0.35,
+  },
+  dayCellToday: {
+    borderColor: colors.gold,
+  },
+  dayCellSelected: {
+    backgroundColor: colors.violet,
+    borderColor: colors.violet,
+  },
+  dayNumber: {
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 13,
+  },
+  dayNumberMuted: {
+    color: colors.muted,
+  },
+  dayNumberSelected: {
+    color: colors.text,
+  },
+  dayDots: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 3,
+    justifyContent: "center",
+  },
+  dayDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 999,
   },
   sectionHeader: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
+    justifyContent: "space-between",
   },
-  sectionTitle: { color: colors.text, fontSize: 24, fontWeight: "900" },
-  muted: { color: colors.muted },
-  item: {
+  sectionTitle: {
+    color: colors.gold,
+    fontSize: 13,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+  },
+  sectionLink: {
+    color: colors.violet,
+    fontWeight: "900",
+    fontSize: 13,
+  },
+  listStack: {
+    gap: 12,
+  },
+  planCard: {
     backgroundColor: colors.bg2,
-    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 24,
     padding: 14,
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "flex-start",
+    overflow: "hidden",
+    ...softShadow,
+  },
+  colorBar: {
+    width: 5,
+    alignSelf: "stretch",
+    borderRadius: 999,
+  },
+  planTopRow: {
     flexDirection: "row",
     gap: 10,
     alignItems: "center",
   },
-  itemTitle: { color: colors.text, fontWeight: "900", fontSize: 16 },
-  itemSub: { color: colors.muted, marginTop: 4 },
-  completedText: { textDecorationLine: "line-through", opacity: 0.55 },
-  groupTag: {
+  planTitle: {
+    flex: 1,
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 17,
+  },
+  completedTitle: {
+    opacity: 0.55,
+    textDecorationLine: "line-through",
+  },
+  planMeta: {
+    color: colors.muted,
+    fontWeight: "800",
+    marginTop: 5,
+  },
+  planDescription: {
+    color: colors.text2,
+    fontWeight: "700",
+    marginTop: 7,
+    lineHeight: 20,
+  },
+  editableText: {
+    color: colors.green,
+    fontWeight: "900",
+    fontSize: 12,
+  },
+  viewOnlyText: {
+    color: colors.violet,
+    fontWeight: "900",
+    fontSize: 12,
+  },
+  pillRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 7,
+    marginTop: 10,
+  },
+  scopePill: {
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 999,
+    paddingVertical: 5,
+    paddingHorizontal: 7,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    marginTop: 8,
   },
-  groupTagText: { color: colors.soft, fontWeight: "900", fontSize: 12 },
-  deleteButton: {
-    backgroundColor: colors.red,
-    borderRadius: 14,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+  scopePillText: {
+    color: colors.text2,
+    fontWeight: "900",
+    fontSize: 11,
   },
-  deleteText: { color: colors.text, fontWeight: "900", fontSize: 12 },
-  modeSwitch: {
-    flexDirection: "row",
-    backgroundColor: colors.bg2,
-    padding: 5,
-    borderRadius: 18,
-  },
-  modeButton: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 14,
-    alignItems: "center",
-  },
-  modeButtonActive: {
+  personalDot: {
+    minWidth: 22,
+    height: 22,
+    borderRadius: 999,
     backgroundColor: colors.violet,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 5,
   },
-  modeText: {
-    color: colors.muted,
+  personalDotText: {
+    color: colors.text,
+    fontSize: 9,
     fontWeight: "900",
   },
-  modeTextActive: {
+  smallPill: {
+    color: colors.text2,
+    backgroundColor: colors.card,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: "900",
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: "hidden",
+  },
+  donePill: {
+    color: colors.green,
+    backgroundColor: colors.greenSoft,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: "900",
+    borderWidth: 1,
+    borderColor: "rgba(45,212,191,0.45)",
+    overflow: "hidden",
+  },
+  checkBox: {
+    width: 28,
+    height: 28,
+    borderRadius: 10,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 2,
+  },
+  checkBoxDone: {
+    backgroundColor: colors.green,
+    borderColor: colors.green,
+  },
+  checkBoxDisabled: {
+    opacity: 0.55,
+  },
+  checkText: {
+    color: colors.bg,
+    fontWeight: "900",
+  },
+  emptyCard: {
+    backgroundColor: colors.bg2,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 18,
+    gap: 6,
+    ...softShadow,
+  },
+  emptyTitle: {
     color: colors.text,
+    fontWeight: "900",
+    fontSize: 18,
+  },
+  emptyText: {
+    color: colors.muted,
+    fontWeight: "700",
+    lineHeight: 20,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.68)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+  },
+  editSheet: {
+    width: "100%",
+    maxWidth: 440,
+    maxHeight: "88%",
+    backgroundColor: colors.bg2,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 30,
+    padding: 16,
+    gap: 14,
+    ...shadow,
+  },
+  editHeader: {
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "center",
+  },
+  editKicker: {
+    color: colors.gold,
+    fontWeight: "900",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    fontSize: 12,
+  },
+  editTitle: {
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 26,
+    letterSpacing: -0.6,
+  },
+  closeButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 999,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  closeText: {
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 24,
+    marginTop: -2,
+  },
+  editContent: {
+    gap: 13,
+    paddingBottom: 10,
   },
   toggle: {
-    backgroundColor: colors.bg2,
-    borderRadius: 16,
+    backgroundColor: colors.card,
+    borderRadius: 18,
     padding: 14,
     borderWidth: 1,
     borderColor: colors.border,
   },
   toggleActive: {
-    backgroundColor: "rgba(45,212,191,0.18)",
-    borderColor: colors.green,
+    backgroundColor: colors.greenSoft,
+    borderColor: "rgba(45,212,191,0.45)",
   },
-  toggleText: { color: colors.text, fontWeight: "900" },
-  label: { color: colors.soft, fontWeight: "900" },
-  quickTimeRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  timeChip: {
-    backgroundColor: colors.bg2,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-  },
-  timeChipActive: {
-    backgroundColor: colors.violet,
-    borderColor: colors.violet,
-  },
-  timeChipText: {
+  toggleText: {
     color: colors.text,
     fontWeight: "900",
-    fontSize: 12,
   },
-  groupPicker: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  groupChoice: {
-    backgroundColor: colors.bg2,
-    borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+  fieldLabel: {
+    color: colors.gold,
+    fontWeight: "900",
+    fontSize: 13,
+    letterSpacing: 0.3,
+  },
+  colorRow: {
     flexDirection: "row",
-    alignItems: "center",
-    gap: 7,
-    borderWidth: 1,
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  colorDot: {
+    width: 38,
+    height: 38,
+    borderRadius: 999,
+    borderWidth: 3,
+    borderColor: colors.bg2,
+  },
+  selectedColorDot: {
+    borderColor: colors.text,
+    transform: [{ scale: 1.08 }],
+  },
+  readOnlyColor: {
+    width: 46,
+    height: 46,
+    borderRadius: 999,
+    borderWidth: 3,
     borderColor: colors.border,
   },
-  groupChoiceActive: {
-    backgroundColor: "rgba(124,92,255,0.32)",
-    borderColor: colors.violet,
+  editInfoBox: {
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 18,
+    padding: 13,
+    gap: 5,
   },
-  groupChoiceText: { color: colors.text, fontWeight: "900" },
+  editInfoText: {
+    color: colors.text2,
+    fontWeight: "800",
+  },
+  deleteButton: {
+    backgroundColor: colors.redSoft,
+    borderRadius: 18,
+    paddingVertical: 14,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(251,113,133,0.45)",
+  },
+  deleteButtonText: {
+    color: colors.red,
+    fontWeight: "900",
+  },
+  viewOnlyBox: {
+    backgroundColor: colors.violetSoft,
+    borderColor: "rgba(124,92,255,0.45)",
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 14,
+  },
+  viewOnlyBoxText: {
+    color: colors.text,
+    fontWeight: "800",
+    lineHeight: 20,
+  },
 });

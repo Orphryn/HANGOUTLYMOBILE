@@ -1,6 +1,7 @@
 import { router, useLocalSearchParams } from "expo-router";
 import { useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
+
 import AppButton from "../components/AppButton";
 import AppInput from "../components/AppInput";
 import { colors } from "../constants/theme";
@@ -15,9 +16,11 @@ export default function Login() {
   const [message, setMessage] = useState(
     params.created ? "Email verified? You can now log in." : ""
   );
+
   const [messageType, setMessageType] = useState(
     params.created ? "success" : "error"
   );
+
   const [loading, setLoading] = useState(false);
 
   function showError(text) {
@@ -73,10 +76,25 @@ export default function Login() {
       return showError("Please verify your email before logging in.");
     }
 
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, profile_completed")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      setLoading(false);
+      return showError(profileError.message);
+    }
+
     showSuccess("Logged in successfully.");
     setLoading(false);
 
-    router.replace("/dashboard");
+    if (!profile?.profile_completed) {
+      router.replace("/profile-setup");
+    } else {
+      router.replace("/dashboard");
+    }
   }
 
   return (
@@ -115,6 +133,7 @@ export default function Login() {
           <AppButton
             title={loading ? "Logging in..." : "Log In"}
             onPress={login}
+            disabled={loading}
           />
         </View>
       </View>
